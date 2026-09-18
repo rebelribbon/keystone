@@ -68,22 +68,41 @@ one project (SPEC §2.2). Do not create a standalone script project.
 
 ## 4. Get the server files
 
-Open this URL in a new tab, replacing `build-1` if you are on a newer tag:
+**Use the newest `build-*` tag.** Tag numbers do not line up with ticket
+numbers: the release workflow fires on every push to `main`, including
+documentation-only commits, so the counter runs ahead. `build-1`, `build-2`, and
+`build-3` contain no server files at all — `dist/server/` 404s on all three,
+because the server code did not exist until later.
 
-```
-https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-1/dist/server/
-```
+1. Open <https://github.com/rebelribbon/keystone/releases>. The release at the
+   top is the newest; note its tag, for example `build-4`.
+2. Confirm that tag actually carries the server files by opening this URL with
+   your tag substituted:
 
-You need these four files:
+   ```
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/appsscript.json
+   ```
 
-- `Code.gs`
-- `Storage.gs`
-- `Index.html`
-- `appsscript.json`
+   You should see JSON starting with `{ "timeZone": ...`. If you get a 404 or a
+   "Couldn't find the requested file" page, that tag predates the server code —
+   go back a release, or wait for the next one.
 
-Open each one directly, for example
-`https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-1/dist/server/Code.gs`,
-and copy the whole contents.
+3. Open each of these four and copy the whole contents. Replace `build-4` with
+   your tag in every URL.
+
+   ```
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Code.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Storage.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Index.html
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/appsscript.json
+   ```
+
+   If jsDelivr renders a file instead of showing plain text, use
+   `https://raw.githubusercontent.com/rebelribbon/keystone/build-4/dist/server/<file>`
+   instead — same content, always served raw.
+
+A brand-new tag can take up to a minute to appear on jsDelivr. The release's own
+notes list every file it contains, under `server`, so you can check there too.
 
 From ticket 004 onward the *Keystone → Update server code* menu item does this
 for you. Until then it is copy and paste.
@@ -165,6 +184,14 @@ the value in column B, starting at row 2 (row 1 is the `key | value` header).
 Leave `{tag}` in `asset_base_url` exactly as written — the server substitutes the
 resolved build tag into it.
 
+`stable_tag` starts at `build-1` because that is the first release and the
+stable deployment should not move until you have tested a build. `build-1`
+carries all seven client bundles, so the cube renders on the stable URL. It
+predates `assets/`, though, so **gate 2 will fail if you run `?dev=gates`
+against the stable URL while `stable_tag` is `build-1`** — run the gates on the
+test URL, which always resolves the newest tag. Promote `stable_tag` to a newer
+build once you have tested it; that is the normal rollback lever (§3.2).
+
 Optional seventh key, only if the test URL will not load bundles from jsDelivr
 (see *If the cube does not appear* below):
 
@@ -206,7 +233,8 @@ If the menu is missing, the `onOpen` trigger has not run — reload once more.
 2. You should see the Keystone loading screen list the six bundles, then a lit,
    shadowed, spinning cube.
 3. Open the browser console (F12). You should see
-   `[KS] boot {tag: "build-1", channel: "test", user: "you@example.com"}`.
+   `[KS] boot {tag: "build-4", channel: "test", user: "you@example.com"}`,
+   with whatever the newest tag is in place of `build-4`.
 
 To run the Phase 0 gates, add `?dev=gates` to the test URL. The panel reports
 gates 1, 2, and 4; transcribe the results into `docs/PHASE0_RESULTS.md`.
@@ -214,6 +242,28 @@ gates 1, 2, and 4; transcribe the results into `docs/PHASE0_RESULTS.md`.
 ---
 
 ## If something goes wrong
+
+**A Google Drive error page: "Sorry, unable to open the file at this time."**
+
+You are signed into more than one Google account. Google rewrites the web app
+URL from `/macros/s/<id>/exec` to `/macros/u/1/s/<id>/exec` (or `u/2`, and so
+on) to pin it to an account, and that rewritten form does not work — Drive
+answers instead of the script.
+
+It looks exactly like a broken deployment, but it is not: the request never
+reaches your script, so **the Apps Script execution log shows no `doGet` run at
+all.** That absence is how you tell this apart from a real server error.
+
+Fix it by making the request come from a browser where the Keystone account is
+the default:
+
+- Open the URL in a Chrome profile whose only, or default, account is that one, or
+- Open an Incognito window and sign into just that account, or
+- Sign out of the other Google accounts and reopen the plain `/exec` (or `/dev`)
+  URL with no `/u/N/` segment in it.
+
+Deleting the `/u/N/` part by hand usually does not stick — Google puts it back.
+Changing which account is the default is what actually holds.
 
 **"This account does not have access."**
 The signed-in address is not in `Users`, or it does not match exactly. The screen

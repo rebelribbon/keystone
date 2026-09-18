@@ -60,3 +60,29 @@ Changed:
   own `display: flex` out-specified the user-agent `[hidden]` rule, so the loading
   screen stayed on top of the cube after boot.
 
+## 002 follow-up — Phase 0 gate results and setup fixes
+
+Documentation only; no source or build changes.
+
+- `docs/PHASE0_RESULTS.md`: transcribed the owner's `?dev=gates` run on the
+  deployed web app (tag `build-4`, channel `stable`, loader `cdn`,
+  2026-09-18T23:05:42.749Z). Gates 1, 2, 4, and 5 **PASS** — first frame at
+  109 ms against a 6000 ms budget, canvas and jsDelivr PNG textures both clean,
+  IndexedDB read-back byte-identical inside the deployed iframe. Gates 3 and 6
+  remain pending on tickets 003 and 004. Phase 0 gates are now closed except
+  those two.
+- `docs/SETUP.md` step 4: stop naming `build-1` as the tag to copy server files
+  from. `build-1`, `build-2`, and `build-3` have no `dist/server/` at all — the
+  release workflow fires on every push to `main`, so tag numbers run ahead of
+  ticket numbers. The step now sends the owner to the releases page for the
+  newest tag, has them verify `dist/server/appsscript.json` resolves before
+  copying, and offers the `raw.githubusercontent.com` form as a fallback.
+- `docs/SETUP.md` troubleshooting: added the Google Drive "Sorry, unable to open
+  the file at this time" case — signed into several Google accounts, Google
+  rewrites the web app URL to `/macros/u/N/s/...` and Drive answers instead of
+  the script. It mimics a broken deployment; the tell is that no `doGet`
+  execution appears in the log, because the request never reaches the script.
+- `docs/SETUP.md` Settings table: kept `stable_tag` at `build-1` as specified,
+  but noted that `build-1` predates `assets/`, so gate 2 fails if `?dev=gates`
+  is run against the stable URL at that tag. Run the gates on the test URL.
+
