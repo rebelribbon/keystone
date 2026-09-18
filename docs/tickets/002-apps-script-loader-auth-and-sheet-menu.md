@@ -56,7 +56,7 @@ This ticket creates `Storage.gs` with just the read helpers the loader needs. Ti
 **Tag resolution.**
 
 - `stable` → `stable_tag` from `Settings`.
-- `test` → newest `build-*` tag, fetched from `https://api.github.com/repos/{github_repo}/releases?per_page=30` with `UrlFetchApp` (`muteHttpExceptions: true`), filtering tag names matching `^build-\\d+$` and sorting by the numeric suffix descending. Cached in `CacheService.getScriptCache()` for 60 s under `ks_tags`. Cache the two newest tags, not just one — the loader's "Try the previous build" needs the second.
+- `test` → newest `build-*` tag, fetched from `https://api.github.com/repos/{github_repo}/releases?per_page=30` with `UrlFetchApp` (`muteHttpExceptions: true`), filtering tag names matching `^build-\d+$` and sorting by the numeric suffix descending. Cached in `CacheService.getScriptCache()` for 60 s under `ks_tags`. Cache the two newest tags, not just one — the loader's "Try the previous build" needs the second.
 - If the GitHub fetch fails or returns no matching tag, fall back to `stable_tag` and set a `degraded` flag that the loading screen surfaces as a one-line banner naming what failed.
 - If `stable_tag` is also missing or empty, render an error page that names the missing `Settings` key and links the Sheet. Never render a page that would load from a broken URL.
 
