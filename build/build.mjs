@@ -123,7 +123,9 @@ async function main() {
       serverFiles.push("dist/server/" + rel.split(sep).join("/"));
     }
   }
-  serverFiles.sort((a, b) => a.localeCompare(b));
+  // Codepoint order, not localeCompare: the manifest must be identical in a
+  // cloud session and on an Actions runner, whatever their locale/ICU build.
+  serverFiles.sort();
 
   // Manifest: every file written under dist/, sorted, with size + sha256.
   const files = walk(outRoot)
@@ -135,7 +137,7 @@ async function main() {
         sha256: createHash("sha256").update(buf).digest("hex"),
       };
     })
-    .sort((a, b) => a.path.localeCompare(b.path));
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   let commit = process.env.GITHUB_SHA;
   if (!commit) {

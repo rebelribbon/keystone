@@ -78,3 +78,9 @@ body {
 .ks-loading__error {
   color: var(--brick);
 }
+
+/* A class-level `display` out-specifies the UA's [hidden] rule, so the loader
+   would stay on screen after boot without this. */
+.ks-loading[hidden] {
+  display: none;
+}
