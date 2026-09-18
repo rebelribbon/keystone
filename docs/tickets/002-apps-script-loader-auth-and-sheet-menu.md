@@ -145,3 +145,124 @@ The panel prints a table of gate, result, measured value, and notes, plus the ta
 - [ ] No `TODO` in `src/`, no shipped placeholder menu items, `docs/DEFERRED.md` updated with the auto-detection cut.
 
 ## Handoff (Builder fills in)
+
+### What changed
+
+The Apps Script half of Phase 0. `doGet` now resolves the signed-in account
+against the `Users` tab, picks a channel and a build tag, and renders the §3.1
+loader shell that pulls the ticket-001 bundles from jsDelivr. Unlisted accounts
+get the access screen and one `access_denied` Log row. The owner-only
+`?dev=gates` route runs gates 1, 2, and 4 and prints a screenshot-ready table.
+
+### Files touched
+
+Added: `src/server/appsscript.json`, `src/server/Code.gs`, `src/server/Storage.gs`,
+`src/server/Index.html`, `assets/test/checker.png`, `docs/SETUP.md`,
+`docs/PHASE0_RESULTS.md`, `tests/server-logic.test.js`, `tests/loader-template.test.js`,
+three harness screenshots under `screenshots/`.
+
+Updated: `CHANGELOG.md`, `docs/DEFERRED.md`.
+
+Changed beyond the ticket's file list, both minimal and both forced by a real defect:
+
+1. **`build/build.mjs`** — manifest entries sorted with `localeCompare`, which is
+   locale/ICU dependent. With mixed-case server filenames (`Code.gs` vs
+   `appsscript.json`) that ordering diverged from plain codepoint order and broke
+   `manifest.test.js`. Switched both sorts to codepoint order so the manifest is
+   byte-identical in a cloud session and on an Actions runner. The ticket asked me
+   to flag any build change: this is it.
+2. **`src/client/ui/styles.css`** — added `.ks-loading[hidden] { display: none }`.
+   The ticket explicitly allows extending this file for the loading screen. The
+   `.ks-loading` class sets `display: flex`, which out-specifies the user-agent
+   `[hidden]` rule, so `loadingEl.hidden = true` set the attribute but left the
+   overlay covering the cube. Caught by rendering the page, not by a test.
+
+### Verified in-session
+
+`npm test` (68 tests across 5 files) and `npm run build` both pass. `dist/server/`
+contains the four server files and `manifest.json` lists them under `server`.
+
+Because the cloud session cannot deploy Apps Script, I rendered
+`src/server/Index.html` through a local stand-in for `HtmlService` templating
+(same `<? ?>` / `<?= ?>` / `<?!= ?>` semantics), served the real built bundles over
+HTTP, and drove it in headless Chromium:
+
+- **Happy path** — loading screen lists six bundles, all go green, screen hides,
+  lit shadowed spinning cube renders, console logs
+  `[KS] boot {tag, channel, user}`. All four catalog packs registered.
+  (`screenshots/002-loader-cube-harness.png`)
+- **Failure path** — with `engine.js` returning 404, the screen stops, marks that
+  file red, names the file and the tag, and offers *Try the previous build
+  (build-0)*. (`screenshots/002-loader-failure-harness.png`)
+- **Degraded path** — the banner renders the fallback reason text.
+- **`?dev=gates`** — gate 1 PASS (376 ms to first frame, budget 6000), gate 2 PASS
+  (procedural canvas texture and the jsDelivr PNG both render, no CORS error),
+  gate 4 PASS (byte-identical IndexedDB read-back). Gates 3 and 6 show
+  `not in this ticket`. (`screenshots/002-dev-gates-harness.png`)
+
+**These harness numbers are not gate results.** They exercise the template and the
+client code, not Apps Script, `HtmlService`, the iframe sandbox, or real jsDelivr.
+`docs/PHASE0_RESULTS.md` keeps gates 1, 2, and 4 `pending` until you run
+`?dev=gates` on the deployed test URL.
+
+One defect the harness caught before deployment: `Index.html` reads `devGates`,
+but `doGet` never assigned it to the template. In Apps Script that is a
+`ReferenceError` during `evaluate()`, which would have broken **every** page load,
+not just the gates route. Fixed.
+
+### How you verify it
+
+Follow `docs/SETUP.md` start to finish — about 30 minutes, nothing installed.
+Then, from the ticket's acceptance list:
+
+1. Test URL as you: loading screen, then the cube. Console shows tag and channel.
+2. A Google account with no `Users` row: access screen, and exactly one
+   `access_denied` row in `Log`.
+3. `?dev=gates` as owner: PASS on 1, 2, 4 with gate 1 under 6000 ms. Transcribe
+   into `docs/PHASE0_RESULTS.md` and screenshot.
+4. Set `github_repo` to a nonexistent repo: the page falls back to `stable_tag`
+   and shows the degraded banner instead of failing. Put it back afterwards.
+5. Merge the next PR: `build-2` appears and the test URL serves it within two
+   minutes with nobody touching Apps Script.
+6. With `stable_tag` = `build-1`, the stable `/exec` URL serves `build-1` while
+   `/dev` serves the newest tag.
+
+### Decisions and readings worth your eye
+
+- **The gates panel overlays the cube rather than replacing it.** The ticket says
+  "renders a results panel instead of the cube", but gate 1 measures the cube's
+  first rendered frame and gate 2 needs `window.THREE`, so the page still boots
+  normally and the panel is a full-screen scrollable overlay on top. Say the word
+  and I will suppress the cube and measure a bare render instead.
+- **"Every script tag carries `defer`" is asserted for external scripts only.**
+  `defer` is a no-op on inline scripts, so adding it there would be decoration.
+  Ordering is still guaranteed: the boot block waits for `DOMContentLoaded`, which
+  fires after every deferred script has run. The test asserts all six external
+  tags carry `defer`.
+- **The *Try the previous build* button is shown only to an owner.** `?tag=` is
+  owner-only server-side, so rendering the button for an editor or viewer would be
+  a button that silently does nothing. Non-owners get a line naming the tag to ask
+  you for instead.
+- **`api_getBundle_` is reached server-side, during template evaluation.** Its
+  trailing underscore makes it private to `google.script.run` by design, and inline
+  mode needs the source inlined into the page anyway, so `doGet` calls it while
+  building the template rather than exposing it to the client.
+- **Boot payload injection.** Everything the page needs is one `toSafeJson_` blob
+  that escapes `<`, `>`, and `&`, so no settings or user value can terminate the
+  script element. `tests/loader-template.test.js` fails if any other unescaped
+  scriptlet output appears in the template.
+
+### Known issues / open questions
+
+- `src/server/` is not linted or type-checked; the `.gs` files are only compile-
+  checked and exercised through the sandbox tests. Anything touching
+  `SpreadsheetApp`, `HtmlService`, `ScriptApp`, or `UrlFetchApp` at runtime is
+  unverified until you deploy.
+- `inline` loader mode is implemented but never executed end to end — no way to
+  run `UrlFetchApp` here. If gate 1 fails on `cdn`, expect to shake this path out.
+  `vendor-three.js` is ~684 KB, about 912 KB base64, roughly ten `CacheService`
+  chunks; that is within limits but it is the riskiest untested path in the ticket.
+- The Manrope font request fails in this sandbox (TLS interception on
+  `fonts.googleapis.com`). That is the environment, not the code; it will load in
+  your browser.
+- `docs/PHASE0_RESULTS.md` gates 1, 2, and 4 are yours to fill from the real run.
