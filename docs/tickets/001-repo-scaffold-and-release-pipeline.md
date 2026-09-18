@@ -170,3 +170,62 @@ The four content entry points each call `KS.registry.registerPack({ id, version:
 - [ ] No `TODO` string anywhere in `src/`, and no EA/Maxis/Sims reference anywhere in the repo.
 
 ## Handoff (Builder fills in)
+
+### What changed
+Stood up the full Phase 0 machinery: repo skeleton, esbuild pipeline, vitest
+harness, and the CI + release GitHub Actions workflows. No Apps Script code
+(that's 002). The build produces the locked bundle set; merging to `main` will
+publish `dist/` to the `release` branch and tag `build-N` with no manual steps.
+
+### Files touched (all new)
+- Config: `.gitignore` (ignores `dist/`, `node_modules/`), `.nvmrc` (Node 20),
+  `package.json` (`three@0.170.0`, `esbuild`, `vitest`), `package-lock.json`.
+- Build: `build/build.mjs` — esbuild IIFE bundles, verbatim `styles.css` +
+  `src/server/**` copy, `dist/manifest.json` (tag/commit/builtAt/schemaVersion +
+  per-file bytes & sha256). `three` is bundled only into `vendor-three.js`; the
+  other five bundles read `window.THREE`.
+- Client: `src/client/vendor/three-entry.js`, `src/client/core/namespace.js`
+  (installs `window.KS`, throws on double-load), `src/client/registry/registry.js`
+  (store / duplicate-throw / non-object-reject only), `src/client/dev/boot-cube.js`
+  (§8.1 scene), `src/client/main.js` (`KS.boot`), `src/client/ui/styles.css`
+  (§13.1 tokens + reset + `#ks-root` + unused `.ks-loading`).
+- Content: `src/content/{materials,styles,exterior,interior}/index.js` — each
+  registers one empty pack (`core.materials`, `core.styles`, `core.exterior`,
+  `core.interior`).
+- Tests: `tests/registry.test.js`, `tests/manifest.test.js`,
+  `tests/build-output.test.js`.
+- CI/CD: `.github/workflows/ci.yml`, `.github/workflows/release.yml`.
+- Docs: `CHANGELOG.md`, `docs/DEFERRED.md`.
+
+### Verified in-session
+- `npm ci`, `npm test` (13 tests, 3 files, all pass), `npm run build` all pass.
+- After build, `dist/client/` contains exactly the 7 locked files; `manifest.json`
+  has a `files` array with 64-hex `sha256` on every entry. `vendor-three.js` is
+  ~668 KB (Three.js); the other five are all under 3 KB (well under 50 KB), and
+  `engine.js` contains no `localStorage`.
+- Rendered a scratch HTML page (styles.css → vendor-three.js → engine.js → the
+  four catalog bundles in §3.1 order → `KS.boot({tag:"build-1", channel:"test",
+  user:"local"})`) in headless Chromium: `window.THREE` and `window.KS` present,
+  `KS.version` = `0.1.0`, all four packs registered, a `<canvas>` mounts under
+  `#ks-root`, and a **lit, shadowed, spinning cube** renders (screenshot below).
+- Hard rules: no `TODO` in `src/`, no `localStorage` in client source, no
+  EA/Maxis/Sims references in code or asset names, no secrets. `dist/` and
+  `node_modules/` are gitignored and not committed.
+
+![Phase 0 boot cube](../../screenshots/001-boot-cube.png)
+
+### How the owner verifies on the test URL
+This ticket ships no server code, so verification is against the released bundles
+(the owner's real test-URL verification happens in 002). After merge:
+- Tag `build-1` and a GitHub Release appear within ~3 min, no manual steps.
+- `main` has no `dist/`; the `release` branch does.
+- `https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-1/dist/client/engine.js`
+  returns 200 (first fetch can lag the tag by up to a minute).
+
+### Known issues
+- `npm audit` reports advisories in dev-only transitive deps (esbuild dev server,
+  `@vitest/mocker`). They affect local dev-server scenarios only, not the shipped
+  bundles or CI; fixes would require major bumps of `esbuild`/`vitest`, out of
+  scope for this ticket.
+- The boot cube uses a continuous rAF loop; render-on-demand (§4.2) is deferred to
+  Phase 1 (see `docs/DEFERRED.md`).
