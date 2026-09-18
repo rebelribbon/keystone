@@ -1,0 +1,80 @@
+/* Keystone identity tokens and base layout (SPEC §13.1).
+   Component styles and layout arrive in later phases. The .ks-loading block is
+   styled here but driven by the loader in ticket 002. */
+
+:root {
+  /* §13.1 identity tokens */
+  --survey: #0F7C8C;   /* primary actions, active tool, selection outline */
+  --brass: #C39A3E;    /* handles, drag affordances, style match meter */
+  --graphite: #27303A; /* text, icon strokes */
+  --mortar: #EEF1F0;   /* panel base */
+  --limewash: #FFFFFF; /* cards, inputs */
+  --brick: #B4432F;    /* errors, destructive actions, invalid placement */
+  --sage: #5E8B6A;     /* success, within budget */
+}
+
+/* Minimal reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Manrope", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--graphite);
+  background: var(--mortar);
+}
+
+/* 3D viewport host: fills the viewport, no scrollbars. */
+#ks-root {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#ks-root canvas {
+  display: block;
+}
+
+/* Loading screen — styled, unused in this ticket (driven by the loader in 002). */
+.ks-loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--mortar);
+  color: var(--graphite);
+  font-size: 14px;
+}
+
+.ks-loading__bar {
+  width: 240px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--limewash);
+  overflow: hidden;
+}
+
+.ks-loading__bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--survey);
+  transition: width 160ms ease;
+}
+
+.ks-loading__error {
+  color: var(--brick);
+}

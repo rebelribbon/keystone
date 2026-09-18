@@ -1,0 +1,44 @@
+{
+  "tag": "build-2",
+  "commit": "d9bc25b7fdea257f2afd9eb4a498a3459a07196a",
+  "builtAt": "2026-09-18T01:54:29.407Z",
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "dist/client/catalog-exterior.js",
+      "bytes": 114,
+      "sha256": "f945050eec17819f8578fcc58218356b3a7930ad855ce78cc20c8a8b0c84c2f3"
+    },
+    {
+      "path": "dist/client/catalog-interior.js",
+      "bytes": 114,
+      "sha256": "592043e90cb2fb633e0814315061138e2fa6e79ea10091c7b4b7918574b35e6c"
+    },
+    {
+      "path": "dist/client/catalog-materials.js",
+      "bytes": 115,
+      "sha256": "c4252b2d146150a8ac1840e5cef56c13fc1c5805b7687d21b7dd75fe96feae8a"
+    },
+    {
+      "path": "dist/client/catalog-styles.js",
+      "bytes": 112,
+      "sha256": "85ecaa3e66a33fa520bcb330d80e8a577c1f91538476bfe3ab360e81016de028"
+    },
+    {
+      "path": "dist/client/engine.js",
+      "bytes": 2821,
+      "sha256": "116cdb9e7e5ce981ec725b04de684042c568c1eab02a241b5c3e0cf1bb8091e7"
+    },
+    {
+      "path": "dist/client/styles.css",
+      "bytes": 1732,
+      "sha256": "de2c12a206815ef21e404dbf7b9e3ae6c973fe5aab6df928ee3c0da8f1ecfec5"
+    },
+    {
+      "path": "dist/client/vendor-three.js",
+      "bytes": 684523,
+      "sha256": "10cae1885d9fd79648438d6e3ff71b9174164439c007f37f123fae353539f517"
+    }
+  ],
+  "server": []
+}
