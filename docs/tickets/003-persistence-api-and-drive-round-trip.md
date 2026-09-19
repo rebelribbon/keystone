@@ -178,6 +178,41 @@ logging.
 original's `updated` and `driveFileId` untouched, and a save carrying the
 current `baseUpdated` committed cleanly with no conflict.
 
+### Gate 3 on the deployed URL — measured
+
+Owner's run, stable URL, tag `build-6`, 2026-09-19T16:54:39Z. **PASS**: 5,242,880
+bytes in and out, SHA-256 `065ce635…84d374d7` identical on both sides, 70 chunks
+at the 100,000-character floor after 5 upload attempts, test build soft-deleted.
+Full table in `docs/PHASE0_RESULTS.md`.
+
+| | Save | Load |
+|---|---|---|
+| Wall clock | 68.2 s | 518.9 s |
+| Per chunk (70) | 0.97 s | 7.41 s |
+
+**Save came in under the 90 s threshold**, so the §7 escalation — an ADR moving
+chunk staging off `CacheService` — is not triggered.
+
+**Load is 7.61x the save over the identical 70 chunks, and §7 did not anticipate
+it.** §7 reasoned about the upload path only: base64 inflation, the ladder, the
+number of round trips. It assumed the two directions were symmetric. They are
+not, and the round trip is 9.8 minutes end to end.
+
+The mechanism is almost certainly the one already listed under *Deviations*
+below: `api_loadChunk` re-reads the entire Drive file and re-base64-encodes it on
+every call before returning one 100,000-character slice, so a load is 70 full
+5 MB Drive reads plus 70 full 7 MB encodes, while `api_saveChunk` writes a single
+cache key per call. The measured ratio is the same order as that asymmetry, which
+is consistent with the explanation without isolating Drive read time from encode
+time — nobody has instrumented the two separately.
+
+**Recorded, not fixed.** Ticket 003 scopes performance work out and the owner
+directed that this stay a measurement. The design question — cache the encoded
+payload for the duration of a load, stage chunks differently, or return larger
+slices now that the cache cap does not bind on the read path — belongs to the
+Architect, and it is a bigger decision than the save-side one §7 pre-authorized,
+because it changes the read path rather than the staging mechanism.
+
 ### What you have to verify
 
 Everything above is local and in-process. It proves the logic, not the platform.

@@ -1,20 +1,20 @@
 # Phase 0 verification gates — results
 
-The six gates from SPEC §2.1.
-
-- Tag: `build-4`
-- Channel: **stable**
-- Loader mode: `cdn`
-- Gates 1, 2, 4 run at: 2026-09-18T23:05:42.749Z
+The six gates from SPEC §2.1. Five pass. Only gate 6 (the updater, ticket 004)
+is outstanding.
 
 | Gate | Result | Measured | Notes |
 |---|---|---|---|
 | 1 — Loader | **PASS** | 109 ms to first frame | All bundles loaded from jsDelivr. Boot block at 84 ms. Budget 6000 ms. |
 | 2 — Texture | **PASS** | canvas 64 px + 64 px PNG | Canvas-generated texture and `assets/test/checker.png` both rendered, no CORS error. |
-| 3 — Round-trip | pending — owner's `?dev=gate3` run | | 5 MB dummy build, gzip + chunked to Drive, SHA-256 compared before gzip and after gunzip. |
+| 3 — Round-trip | **PASS** | 5,242,880 bytes, digests match | 5 MB saved to Drive gzip + chunked and loaded back byte-identical. Detail below. |
 | 4 — Storage | **PASS** | read-back byte-identical | IndexedDB works inside the deployed iframe, so the thumbnail cache does not need the memory fallback. |
-| 5 — Release | **PASS** | `build-4` | The page loaded its bundles from `build-4`. Merging to `main` tags a build, the `release` branch carries `dist/`, and jsDelivr serves it with no manual step. |
+| 5 — Release | **PASS** | `build-4` | Merging to `main` tags a build, the `release` branch carries `dist/`, and jsDelivr serves it with no manual step. |
 | 6 — Updater | pending — ticket 004 | | Sheet menu *Keystone → Update server code* overwrites the Apps Script files from a tag. |
+
+Gates 1, 2, 4, 5 were run at 2026-09-18T23:05:42.749Z on tag `build-4`.
+Gate 3 was run at 2026-09-19T16:54:39Z on tag `build-6`. Both on the **stable**
+channel.
 
 Gate 1 came in at 109 ms against a 6000 ms budget — roughly 55x headroom. That
 is the loader and the Phase 0 cube only; the real engine arrives in Phase 1.
@@ -22,58 +22,69 @@ is the loader and the Phase 0 cube only; the real engine arrives in Phase 1.
 Gate 4 passing means IndexedDB is available inside the `HtmlService` iframe, so
 the thumbnail cache (§13.3) can use it rather than falling back to memory.
 
-## Which channel these were run on
+## Gate 3 — Drive round-trip, in detail
 
-**Gates 1, 2, 4, and 5 were all verified on the stable deployment, not the test
-one.** At the time there was no usable test channel: the `/dev` URL returns a
-Google Drive error page whenever the owner is signed into more than one Google
-account, because Google rewrites the path to `/macros/u/N/s/...` and the request
-never reaches `doGet`.
-
-ADR 0001 removed `/dev` from the deployment model in response. The test channel
-is now a second versioned `/exec` deployment selected by `?c=test`. Nothing in
-the gate results above depends on the channel — they exercise the loader, the
-renderer, and the browser sandbox, none of which differ between the two — and
-the tag-resolution difference that does differ is what gate 5 covers.
-
-Re-running gates 1, 2, and 4 on the test deployment once it exists is worthwhile
-confirmation but is not expected to change any result.
-
-## Gate 3 — fill in from the `?dev=gate3` run
-
-Open either deployment URL with `?dev=gate3` as the owner and transcribe the
-panel. The harness generates a deterministic 5 MB buffer from a fixed seed, so
-the "SHA-256 before gzip" value is reproducible across runs and machines.
+Owner's `?dev=gate3` run on the deployed stable URL, tag `build-6`,
+2026-09-19T16:54:39Z.
 
 | Measure | Value |
 |---|---|
-| Buffer size | _pending_ |
-| SHA-256 before gzip | _pending_ |
-| gzip size | _pending_ |
-| base64 size | _pending_ |
-| Final chunk size | _pending_ |
-| Chunk count | _pending_ |
-| Upload attempts | _pending_ |
-| Save wall clock | _pending_ |
-| Load wall clock | _pending_ |
-| SHA-256 after gunzip | _pending_ |
-| Gate 3 | _pending_ |
+| Buffer size | 5,242,880 bytes |
+| SHA-256 before gzip | `065ce6350937b564c88562c4fb60be579942f8732cb5a2d2e0e30a3184d374d7` |
+| SHA-256 after gunzip | `065ce6350937b564c88562c4fb60be579942f8732cb5a2d2e0e30a3184d374d7` |
+| Bytes read back | 5,242,880 |
+| gzip size | 5,244,503 bytes |
+| base64 size | 6,992,672 chars |
+| Final chunk size | 100,000 chars |
+| Chunk count | 70 |
+| Upload attempts | 5 |
+| **Save wall clock** | **68.2 s** |
+| **Load wall clock** | **518.9 s** |
+| Result | **PASS** — digests identical, test build soft-deleted |
 
-Ticket 003 §7 asks for the save time to be reported either way, and for the
-Architect to be told if a 5 MB save exceeds 90 seconds.
+The buffer is deterministic (xorshift32 from a fixed seed), so
+`065ce635…84d374d7` is reproducible on any future run and can be compared
+directly against this one.
 
-## Pre-deployment harness check (not a gate result)
+The chunk ladder behaved as ticket 003 §7 predicted: four rejections at 1.5 MB,
+750 KB, 375 KB and 187.5 KB, then success at the 100 KB floor, giving 70 chunks
+and 5 upload attempts.
 
-Before handing ticket 003 over, the Builder ran the gate 3 flow against the real
-`Api.gs`, `Storage.gs`, and `Code.gs` evaluated in a Node sandbox with in-memory
-stand-ins for `SpreadsheetApp`, `CacheService`, `DriveApp`, `LockService`,
-`Utilities`, and `Session`, driven by the real client transport in headless
-Chromium. That run reported PASS: 5,242,880 bytes in, SHA-256
-`065ce635...84d374d7` matching on both sides, gzip 5,244,503 bytes, base64
-6,992,672 characters, 70 chunks of 100,000 characters after 5 upload attempts.
+### Timings, and the asymmetry §7 did not anticipate
 
-**Those numbers are not the gate result.** The stand-ins are local and
-in-process: they do not measure `google.script.run` round-trip latency, which is
-the entire point of the §7 timing risk, and 0.8 s of local save time says
-nothing about what Apps Script will take. The table above stays `pending` until
-the owner runs `?dev=gate3` on a real deployment.
+**Save: 68.2 s.** Under the 90 s threshold ticket 003 §7 set, so the escalation
+it describes — an ADR moving chunk staging off `CacheService` — is not triggered
+by the save path.
+
+**Load: 518.9 s.** That is 8.6 minutes, and **7.61x the save over the same 70
+chunks**: 7.41 s per chunk on load against 0.97 s on save. §7 anticipated the
+save being slow and said nothing about the load, so this is a new measurement,
+not a predicted one. The full round trip is 9.8 minutes.
+
+The likely mechanism is already recorded in the ticket 003 Handoff as a known
+shape of the implementation: `api_loadChunk` re-reads the whole Drive file and
+re-base64-encodes it on **every** call, then returns a single 100,000-character
+slice. Seventy chunks therefore means seventy full 5 MB Drive reads and seventy
+full 7 MB base64 encodes, where the save path's `api_saveChunk` only writes one
+cache key per call. The asymmetry is the same order as the measurement, which is
+consistent but not proof — nothing here isolates Drive read time from encode
+time.
+
+**This is recorded, not fixed.** Ticket 003 explicitly scopes performance work
+out, and the Architect owns whether the fix is caching the encoded payload,
+staging chunks differently, or something else. Numbers first.
+
+## Which channel these were run on
+
+**All five passing gates were verified on the stable deployment.** At the time
+gates 1, 2 and 4 were run there was no usable test channel: the `/dev` URL
+returns a Google Drive error page whenever the owner is signed into more than
+one Google account, because Google rewrites the path to `/macros/u/N/s/...` and
+the request never reaches `doGet`.
+
+ADR 0001 removed `/dev` from the deployment model in response. The test channel
+is now a second versioned `/exec` deployment selected by `?c=test`. Nothing in
+the results above depends on the channel — they exercise the loader, the
+renderer, the browser sandbox, and the Drive round trip, none of which differ
+between the two — and the tag-resolution difference that does differ is what
+gate 5 covers.
