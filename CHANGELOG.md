@@ -200,3 +200,27 @@ without the trailing underscore, because Apps Script will not expose such a name
 to `google.script.run` and the harness calls it from the page — the same defect
 ticket 003 fixed in `api_getBundle`.
 
+
+## 005 follow-up — gate 3 re-run results from the deployment
+
+Documentation only; no source or build changes.
+
+- `docs/PHASE0_RESULTS.md`: transcribed the owner's two `?dev=gate3` re-runs on
+  the deployed stable URL (tag `build-9`, 2026-09-19T22:39:00Z and 22:43:08Z).
+  **Both PASS**, both digest-matching. Load wall clock **518.9 s → 48.3 s**.
+  518.9 s is kept as the before value.
+- Both of ticket 005's acceptance thresholds are met: median per-chunk load ÷
+  median per-chunk save is **0.81x** against a 1.5x budget (542 ms load, 672 ms
+  save), and load wall clock is 48.3 s against a 120 s budget. Per chunk the
+  load is now marginally faster than the save, so the diagnosis in 005 was
+  complete.
+- The like-for-like before/after figure is mean-to-mean — **7,412.9 ms →
+  690.0 ms per chunk on load, 10.7x** — because ticket 003's harness recorded no
+  per-chunk distribution, only wall clock. The doc now labels the `build-6`
+  per-chunk column as wall clock ÷ 70 so the 0.81x is never read as a
+  before/after ratio.
+- The `&evict=17` run is recorded with it: 69 hits / 1 miss, the evicted chunk
+  costing **4492 ms** (the run's max, 7.6x its own median) and the load finishing
+  in 57.3 s. The fallback's per-miss cost is real, bounded to one re-prime, and
+  still below the 7,412.9 ms every chunk paid before 005.
+- Save is unchanged as expected: 68.2 → 70.8 → 68.2 s across the three runs.
