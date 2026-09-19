@@ -27,6 +27,7 @@ export async function saveBuild(bytes, meta, options) {
 
   let size = opts.chunkSize || START_CHUNK_CHARS;
   let attempts = 0;
+  let chunkMs = [];
 
   for (;;) {
     attempts++;
@@ -35,7 +36,9 @@ export async function saveBuild(bytes, meta, options) {
     const uploadId = begun.uploadId;
 
     let tooLarge = false;
+    chunkMs = [];
     for (let i = 0; i < pieces.length; i++) {
+      const startedChunk = Date.now();
       try {
         await callServer("api_saveChunk", [uploadId, i, pieces[i]]);
       } catch (err) {
@@ -45,7 +48,8 @@ export async function saveBuild(bytes, meta, options) {
         }
         throw err;
       }
-      onProgress({ phase: "upload", index: i + 1, total: pieces.length, chunkSize: size });
+      chunkMs.push(Date.now() - startedChunk);
+      onProgress({ phase: "upload", index: i + 1, total: pieces.length, chunkSize: size, ms: chunkMs[i] });
     }
 
     if (tooLarge) {
@@ -58,6 +62,7 @@ export async function saveBuild(bytes, meta, options) {
     return Object.assign({}, committed, {
       chunkSize: size,
       chunkCount: pieces.length,
+      chunkMs,
       uploadAttempts: attempts,
       rawBytes: bytes.length,
       gzipBytes: compressed.length,

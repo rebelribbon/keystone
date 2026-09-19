@@ -153,3 +153,50 @@ Documentation only; no source or build changes.
   per call. Measured and recorded, deliberately not fixed: the read-path design
   is the Architect's call.
 
+## 005 — Load path chunk cache
+
+Defect fix following 003 (spec §14.2, §18). No API renames, no spec change.
+
+Changed:
+- `src/server/Api.gs`: `api_loadBuildInfo` keeps the full Drive read and base64
+  encode it was already paying for, and now primes a per-chunk cache with the
+  result instead of discarding it. Keys are `ks_dl_<buildId>_<revision>_<index>`,
+  6 h TTL, written with `putAll` in batches of 10. A failed batch is logged and
+  ignored: a cache write that does not land degrades to slow reads, never to an
+  error.
+- `api_loadChunk(buildId, index, cacheKeyBase)` reads the cache first and falls
+  back to the original read-encode-slice path on any miss — eviction, expiry, a
+  missing `cacheKeyBase`, or a cache `get` that throws — re-populating just the
+  key that missed. The two paths return identical bytes; the tests assert the
+  hit and the miss byte-for-byte against each other.
+- The revision stamp in the key comes from the row's `updated`, so a re-saved
+  build gets a fresh key space and can never serve chunks from its previous
+  revision.
+- `cacheKeyBase` is caller-controlled input used to build a cache key, so
+  `isDownloadKeyBase_` binds it to the `buildId` argument. A crafted value
+  cannot reach `ks_upload_*` or `ks_settings` in the shared script cache, and
+  validating the shape costs nothing where recomputing it would cost exactly
+  what this ticket removes.
+- `src/client/persistence/load.js` threads `cacheKeyBase` through, times every
+  chunk, and counts hits and misses. `save.js` times its chunks too so the two
+  directions can be compared.
+- `src/client/persistence/stats.js` (new): min / median / max. Median, not mean —
+  one outlier should not move the number being compared.
+- `?dev=gate3` reports per-chunk min/median/max for both directions, wall clocks,
+  cache hits and misses, and the median load/save ratio against a 1.5x budget.
+  `&evict=N` drops one primed chunk through the new owner-only
+  `api_devEvictChunk` to exercise the fallback live; `&cold=1` sends no
+  `cacheKeyBase` at all, forcing every chunk down the slow path.
+
+Added:
+- Eight tests in `tests/server-logic.test.js` covering the cache hit, the miss,
+  hit-equals-miss equality, re-population, the null `cacheKeyBase` cold path, a
+  throwing cache `get`, revision invalidation, and the key-base guard.
+- `docs/DEFERRED.md`: the rejected direct-Drive-fetch optimization and why the
+  `drive.file` scope narrowing is its prerequisite.
+
+Note: ticket 005 spells the eviction helper `api_devEvictChunk_`. It ships
+without the trailing underscore, because Apps Script will not expose such a name
+to `google.script.run` and the harness calls it from the page — the same defect
+ticket 003 fixed in `api_getBundle`.
+

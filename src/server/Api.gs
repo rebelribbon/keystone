@@ -25,6 +25,71 @@ var KS_UPLOAD_TTL_SECONDS = 21600;
  */
 var KS_MAX_CHUNK_CHARS = 100000;
 
+/** Download chunk cache TTL, matching the upload staging cache in 003. */
+var KS_DOWNLOAD_TTL_SECONDS = 21600;
+
+/**
+ * Keys per `putAll` when priming the download cache.
+ *
+ * One `put` per chunk would be the same round-trip mistake the load path is
+ * being fixed for, just on the server. Ten keys is 1 MB per call, which keeps a
+ * comfortable margin under the payload cap while cutting 70 writes to 7.
+ */
+var KS_CACHE_PUT_BATCH = 10;
+
+/* -------------------------------------------------------------------------
+ * Download cache keys (ticket 005)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Pure. A short, cache-key-safe stamp for a build revision.
+ * Epoch milliseconds when `updated` parses as a date, otherwise the value with
+ * everything but letters and digits stripped.
+ * @param {*} updated
+ * @return {string}
+ */
+function revisionStamp_(updated) {
+  var parsed = toTime_(updated);
+  if (!isNaN(parsed)) return String(parsed);
+  return String(updated == null ? '' : updated).replace(/[^A-Za-z0-9]/g, '');
+}
+
+/**
+ * Pure. The download cache key base for one revision of one build.
+ *
+ * The revision stamp is what stops a re-saved build serving chunks from its
+ * previous revision: a new `updated` produces a new key space, and the old
+ * one simply ages out.
+ * @param {string} buildId
+ * @param {*} updated
+ * @return {string}
+ */
+function downloadKeyBase_(buildId, updated) {
+  return 'ks_dl_' + String(buildId) + '_' + revisionStamp_(updated);
+}
+
+/**
+ * Pure. Is this a download key base the client may use for this build?
+ *
+ * The client hands `cacheKeyBase` back so the server can skip re-reading the
+ * index row, which means it is caller-controlled input used to build a cache
+ * key. Binding it to the `buildId` argument keeps a crafted value from reading
+ * another key space — `ks_upload_*` or `ks_settings` — out of the shared script
+ * cache. Validating the shape costs nothing; a Sheet read to recompute it would
+ * cost exactly what this ticket is removing.
+ * @param {*} cacheKeyBase
+ * @param {*} buildId
+ * @return {boolean}
+ */
+function isDownloadKeyBase_(cacheKeyBase, buildId) {
+  var base = String(cacheKeyBase == null ? '' : cacheKeyBase);
+  var id = String(buildId == null ? '' : buildId).trim();
+  if (!id) return false;
+  var prefix = 'ks_dl_' + id + '_';
+  if (base.indexOf(prefix) !== 0) return false;
+  return /^[A-Za-z0-9]+$/.test(base.slice(prefix.length));
+}
+
 /* -------------------------------------------------------------------------
  * Plumbing
  * ---------------------------------------------------------------------- */
@@ -267,39 +332,154 @@ function api_commitSave(uploadId, totalChunks, thumbBase64) {
 }
 
 /**
- * A build's index row plus how many chunks its file will take.
+ * Write every chunk of an already-encoded build into the script cache.
+ *
+ * Batched, and deliberately failure-tolerant: a cache write that does not land
+ * must degrade to slow reads, never to an error. Correctness never depends on
+ * the cache being warm.
+ * @param {string} cacheKeyBase
+ * @param {string} base64
+ * @param {number} total
+ */
+function primeDownloadCache_(cacheKeyBase, base64, total) {
+  var cache = CacheService.getScriptCache();
+  var batch = {};
+  var pending = 0;
+
+  for (var i = 0; i < total; i++) {
+    batch[cacheKeyBase + '_' + i] = base64.substr(i * KS_MAX_CHUNK_CHARS, KS_MAX_CHUNK_CHARS);
+    pending++;
+    if (pending === KS_CACHE_PUT_BATCH) {
+      putCacheBatch_(cache, batch);
+      batch = {};
+      pending = 0;
+    }
+  }
+  if (pending) putCacheBatch_(cache, batch);
+}
+
+/**
+ * One batched cache write that never throws into the caller.
+ * @param {!Object} cache
+ * @param {!Object<string,string>} batch
+ */
+function putCacheBatch_(cache, batch) {
+  try {
+    cache.putAll(batch, KS_DOWNLOAD_TTL_SECONDS);
+  } catch (err) {
+    console.error('primeDownloadCache_ batch failed, falling back to slow reads: ' + err);
+  }
+}
+
+/**
+ * A build's index row, how many chunks its file takes, and the key base its
+ * chunks are cached under.
+ *
+ * The full Drive read and base64 encode happen here, once. Ticket 003 paid for
+ * that pass and threw the result away, leaving `api_loadChunk` to repeat it per
+ * call; ticket 005 keeps it and populates the cache with it instead.
  * @param {string} buildId
- * @return {{meta: !Object, totalChunks: number}|{code: string, message: string}}
+ * @return {{meta: !Object, totalChunks: number, cacheKeyBase: string}|{code: string, message: string}}
  */
 function api_loadBuildInfo(buildId) {
   return apiCall_(function () {
     var row = readBuildRow_(buildId);
     if (!row) throw ksError_('BUILD_NOT_FOUND', 'No build with that id.');
+
     var base64 = Utilities.base64Encode(readBuildFile_(row.build.driveFileId));
+    var total = Math.ceil(base64.length / KS_MAX_CHUNK_CHARS);
+    var cacheKeyBase = downloadKeyBase_(row.build.buildId, row.build.updated);
+
+    primeDownloadCache_(cacheKeyBase, base64, total);
+
     return {
       meta: row.build,
-      totalChunks: Math.ceil(base64.length / KS_MAX_CHUNK_CHARS),
-      base64Chars: base64.length
+      totalChunks: total,
+      base64Chars: base64.length,
+      cacheKeyBase: cacheKeyBase
     };
   });
 }
 
 /**
- * One base64 chunk of a build's file.
+ * One base64 chunk of a build's file, from the cache when it is there.
+ *
+ * `cacheKeyBase` is optional. Omitting it, or missing the cache for any reason
+ * — eviction, TTL expiry, a caller that skipped api_loadBuildInfo — falls back
+ * to the original read-and-encode path and produces identical bytes, just
+ * slowly. That equivalence is the property the whole design rests on, and
+ * tests/server-logic.test.js asserts the two paths byte-for-byte.
  * @param {string} buildId
  * @param {number} index
- * @return {string|{code: string, message: string}}
+ * @param {string=} cacheKeyBase
+ * @return {{chunk: string, cached: boolean}|{code: string, message: string}}
  */
-function api_loadChunk(buildId, index) {
+function api_loadChunk(buildId, index, cacheKeyBase) {
   return apiCall_(function () {
+    var idx = Number(index) || 0;
+
+    if (isDownloadKeyBase_(cacheKeyBase, buildId)) {
+      var hit = null;
+      try {
+        hit = CacheService.getScriptCache().get(cacheKeyBase + '_' + idx);
+      } catch (err) {
+        hit = null;
+      }
+      if (hit !== null && hit !== undefined) {
+        return { chunk: hit, cached: true };
+      }
+    }
+
     var row = readBuildRow_(buildId);
     if (!row) throw ksError_('BUILD_NOT_FOUND', 'No build with that id.');
+
     var base64 = Utilities.base64Encode(readBuildFile_(row.build.driveFileId));
-    var start = (Number(index) || 0) * KS_MAX_CHUNK_CHARS;
+    var start = idx * KS_MAX_CHUNK_CHARS;
     if (start >= base64.length) {
       throw ksError_('CHUNK_OUT_OF_RANGE', 'Chunk ' + index + ' is past the end of this build.');
     }
-    return base64.substr(start, KS_MAX_CHUNK_CHARS);
+    var chunk = base64.substr(start, KS_MAX_CHUNK_CHARS);
+
+    // Re-populate only the key that missed; re-priming the whole build here
+    // would turn one slow read into one slow read plus a full cache rewrite.
+    try {
+      CacheService.getScriptCache().put(
+        downloadKeyBase_(row.build.buildId, row.build.updated) + '_' + idx,
+        chunk,
+        KS_DOWNLOAD_TTL_SECONDS
+      );
+    } catch (err) {
+      console.error('api_loadChunk re-populate failed: ' + err);
+    }
+
+    return { chunk: chunk, cached: false };
+  });
+}
+
+/**
+ * Owner-only: drop one download chunk from the cache so the fallback path can
+ * be exercised on a live deployment (`?dev=gate3&evict=N`).
+ *
+ * The name carries no trailing underscore on purpose. Ticket 005 spells it
+ * `api_devEvictChunk_`, but Apps Script will not expose a name ending in an
+ * underscore to google.script.run, and the gate 3 harness calls this from the
+ * page — the same defect ticket 003 fixed in `api_getBundle`.
+ * @param {string} cacheKeyBase
+ * @param {number} index
+ * @return {{ok: boolean, evicted: number}|{code: string, message: string}}
+ */
+function api_devEvictChunk(cacheKeyBase, index) {
+  return apiCall_(function (access) {
+    if (access.role !== 'owner') {
+      throw ksError_('FORBIDDEN', 'Only the owner can evict cache entries.');
+    }
+    var base = String(cacheKeyBase == null ? '' : cacheKeyBase);
+    if (!/^ks_dl_[A-Za-z0-9_]+$/.test(base)) {
+      throw ksError_('BAD_REQUEST', 'cacheKeyBase must be a download cache key base.');
+    }
+    var idx = Number(index) || 0;
+    CacheService.getScriptCache().remove(base + '_' + idx);
+    return { ok: true, evicted: idx };
   });
 }
 

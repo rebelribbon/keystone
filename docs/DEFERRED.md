@@ -27,4 +27,17 @@ Cuts made intentionally, with the reason. (Hard rule: no shipped TODOs — cuts 
 - **Autosave, IndexedDB recovery copies, export/import, and screenshots (§14.3)** —
   deferred from ticket 003. All four serialize the Store, which does not exist until
   Phase 1. Gate 3 uses a dummy buffer precisely so the transport can be proven first.
+- **Direct Drive fetch from the client (§14.2, load path)** — rejected in ticket 005.
+  Handing the page an OAuth token from `ScriptApp.getOAuthToken()` would let it pull
+  the `.ksb` in a single request and put load time in the low single-digit seconds,
+  beating the chunk cache outright. It is rejected on the threat model, not the
+  performance: the manifest carries the full `drive` scope, and the page's JavaScript
+  is served from a public CDN at a tag anyone can read. A token with that scope in
+  that page couples a repo compromise to a Drive compromise — every build, every
+  family member, not just Keystone's own folder.
+  Narrowing the manifest from `drive` to `drive.file` is the prerequisite if load time
+  ever becomes the binding constraint again. That changes the manifest, the setup
+  authorization prompt, and the threat model, so it is an ADR rather than an
+  implementation decision. The chunk cache in 005 was taken instead because it needs
+  none of that.
 
