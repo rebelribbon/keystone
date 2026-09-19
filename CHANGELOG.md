@@ -135,3 +135,21 @@ Changed:
   same `Users` gate as the rest of the API and validates both arguments against
   allowlists rather than letting them steer the fetch URL.
 
+## 003 follow-up — gate 3 results from the deployed run
+
+Documentation only; no source or build changes.
+
+- `docs/PHASE0_RESULTS.md`: transcribed the owner's `?dev=gate3` run on the
+  deployed stable URL (tag `build-6`, 2026-09-19T16:54:39Z). **Gate 3 PASS** —
+  5,242,880 bytes round-tripped byte-identical, SHA-256 `065ce635…84d374d7` on
+  both sides, 70 chunks at the 100,000-character floor after 5 upload attempts.
+  Phase 0 now has five gates passing; only gate 6 (the updater, ticket 004) is
+  outstanding.
+- Recorded the timing asymmetry: save 68.2 s, load 518.9 s. The save is under the
+  90 s threshold ticket 003 §7 set, so its escalation is not triggered. The load
+  is **7.61x the save over the same 70 chunks** (7.41 s vs 0.97 s per chunk),
+  which §7 did not anticipate — it reasoned about the upload path only. The
+  likely cause is `api_loadChunk` re-reading and re-encoding the whole Drive file
+  per call. Measured and recorded, deliberately not fixed: the read-path design
+  is the Architect's call.
+
