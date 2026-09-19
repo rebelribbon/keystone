@@ -170,6 +170,35 @@ incomplete and the Handoff has to say so with the figures rather than pointing a
 a smaller total. I have not pre-written that sentence, because writing it before
 the measurement exists is how a number gets talked into looking good.
 
+### Measured on the deployment — both thresholds met
+
+Owner's runs on the stable URL, tag `build-9`, 2026-09-19. Full transcription in
+`docs/PHASE0_RESULTS.md`.
+
+| Run | Hits / misses | Median save | Median load | Ratio | Load wall clock | Gate 3 |
+|---|---|---|---|---|---|---|
+| `?dev=gate3` 22:39:00Z | 70 / 0 | 672 ms | 542 ms | **0.81x** | **48.3 s** | PASS |
+| `?dev=gate3&evict=17` 22:43:08Z | 69 / 1 | 682 ms | 594 ms | 0.87x | 57.3 s | PASS |
+
+Budget was 1.5x and 120 s. Both runs clear both, with the ratio under 1.0 — per
+chunk the load is now marginally faster than the save. Digests matched on both
+runs. **The diagnosis in this ticket was complete**: the sentence I refused to
+pre-write is not needed.
+
+The before/after comparison that is actually like-for-like is mean-to-mean,
+because ticket 003's harness recorded no per-chunk distribution: **7,412.9 ms →
+690.0 ms per chunk on load, 10.7x.** The 0.81x is a within-run ratio against the
+acceptance budget, not a before/after figure.
+
+The sandbox A/B called the direction right and the magnitude wrong, as flagged:
+sandbox 0.67x warm / 5.67x cold against a deployed 0.81x warm. The evicted chunk
+cost **4492 ms** on the deployment — the run's max, 7.6x its own median — so the
+fallback is genuinely expensive per miss, and still cheaper than what every chunk
+paid before 005. One miss costs one re-prime, not 70.
+
+`?dev=gate3&cold=1` on the deployment was not run and is not needed; the
+pre-005 behavior is already recorded as the 518.9 s `build-6` run.
+
 ### Deviations and judgement calls
 
 - **`api_loadChunk` now returns `{ chunk, cached }` rather than a bare string.**

@@ -337,6 +337,15 @@
             '  ·  loader ' + boot.loaderMode + '  ·  ' + new Date().toISOString();
           card.appendChild(meta);
 
+          // What server code is actually running (ticket 004). Written by the
+          // updater after every successful write; blank until it has run once.
+          var server = document.createElement('p');
+          server.className = 'ks-gates__meta';
+          server.textContent = boot.serverTag
+            ? 'server code ' + boot.serverTag + '  ·  ' + (boot.serverFingerprint || 'no fingerprint recorded')
+            : 'server code: not recorded yet — run Keystone → Update server code once to set server_tag.';
+          card.appendChild(server);
+
           var table = document.createElement('table');
           table.innerHTML = '<thead><tr><th>Gate</th><th>Result</th><th>Measured</th><th>Notes</th></tr></thead>';
           var tbody = document.createElement('tbody');

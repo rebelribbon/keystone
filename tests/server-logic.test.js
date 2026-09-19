@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { createHash } from "node:crypto";
 
 // The Builder cannot deploy or run Apps Script from a cloud session, so the
 // server's decision logic is tested by evaluating the .gs files as text in a
@@ -11,6 +12,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const STORAGE_SRC = readFileSync(join(root, "src/server/Storage.gs"), "utf8");
 const CODE_SRC = readFileSync(join(root, "src/server/Code.gs"), "utf8");
 const API_SRC = readFileSync(join(root, "src/server/Api.gs"), "utf8");
+const UPDATER_SRC = readFileSync(join(root, "src/server/Updater.gs"), "utf8");
 
 const SETTINGS_HEADER = ["key", "value"];
 const USERS_HEADER = ["email", "role", "addedOn"];
@@ -27,14 +29,42 @@ function createServer(options = {}) {
     buildsRows = null,
     serviceUrl = "https://script.google.com/macros/s/AKfy/exec",
     fetchImpl = () => ({ code: 404, body: "" }),
+    scriptId = "SCRIPT_ID",
   } = options;
 
   const store = new Map();
   const logRows = [];
   const fetches = [];
+  const dialogs = [];
+  const drive = { folderId: "FOLDER", files: [], trashed: [], toasts: [] };
+  drive.folder = {
+    createFile: (name, content, type) => {
+      const file = { name, content, type };
+      drive.files.push(file);
+      return file;
+    },
+    getFiles: () => iterate(drive.files.filter((f) => !drive.trashed.includes(f.name))),
+    getFilesByName: (name) =>
+      iterate(
+        drive.files
+          .filter((f) => f.name === name && !drive.trashed.includes(name))
+          .map((f) => ({
+            getName: () => f.name,
+            setTrashed: () => drive.trashed.push(f.name),
+          }))
+      ),
+  };
 
   const sheets = {
-    Settings: { getDataRange: () => ({ getValues: () => settingsRows }) },
+    Settings: {
+      getDataRange: () => ({ getValues: () => settingsRows }),
+      appendRow: (row) => settingsRows.push(row),
+      getRange: (rowNumber, column) => ({
+        setValue: (value) => {
+          settingsRows[rowNumber - 1][column - 1] = value;
+        },
+      }),
+    },
     Users: { getDataRange: () => ({ getValues: () => usersRows }) },
     Log: { appendRow: (row) => logRows.push(row) },
   };
@@ -67,7 +97,13 @@ function createServer(options = {}) {
     },
     CacheService: { getScriptCache: () => cache },
     Session: { getActiveUser: () => ({ getEmail: () => email }) },
-    ScriptApp: { getService: () => ({ getUrl: () => serviceUrl }) },
+    ScriptApp: {
+      getService: () => ({ getUrl: () => serviceUrl }),
+      getScriptId: () => scriptId,
+      // The token must never reach a payload, a template, or a Log row. Tests
+      // assert on that by searching for this exact string.
+      getOAuthToken: () => "SECRET_TOKEN",
+    },
     UrlFetchApp: {
       fetch: (url, params) => {
         fetches.push({ url, params });
@@ -81,6 +117,12 @@ function createServer(options = {}) {
       },
     },
     Utilities: {
+      DigestAlgorithm: { SHA_256: "SHA_256" },
+      // Apps Script returns SIGNED bytes, so the hex conversion has to mask.
+      computeDigest: (_algorithm, bytes) => {
+        const digest = createHash("sha256").update(Buffer.from(bytes)).digest();
+        return Array.from(digest).map((b) => (b > 127 ? b - 256 : b));
+      },
       base64Encode: (bytes) => Buffer.from(bytes).toString("base64"),
       base64Decode: (text) => Buffer.from(text, "base64"),
       newBlob: (bytes) => ({
@@ -92,12 +134,41 @@ function createServer(options = {}) {
       getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }),
     },
     DriveApp: {
-      getFolderById: () => {
-        throw new Error("no Drive in the sandbox");
+      getFolderById: (id) => {
+        if (id !== drive.folderId) throw new Error("unknown folder " + id);
+        return drive.folder;
       },
       getFileById: () => {
         throw new Error("no Drive in the sandbox");
       },
+    },
+  };
+  sandbox.SpreadsheetApp.getUi = () => ({
+    showModalDialog: (output, title) => dialogs.push({ title, html: output.html }),
+    alert: (...args) => dialogs.push({ alert: args }),
+    ButtonSet: { OK: "OK" },
+    createMenu: () => {
+      const menu = {
+        items: [],
+        addItem(label, fn) {
+          menu.items.push({ label, fn });
+          return menu;
+        },
+        addSeparator: () => menu,
+        addToUi: () => {},
+      };
+      sandbox.__menu = menu;
+      return menu;
+    },
+  });
+  sandbox.SpreadsheetApp.getActive = () => ({
+    getSheetByName: (name) => sheets[name] || null,
+    toast: (message) => drive.toasts.push(message),
+  });
+  sandbox.HtmlService = {
+    createHtmlOutput: (html) => {
+      const output = { html, setWidth: () => output, setHeight: () => output };
+      return output;
     },
   };
 
@@ -105,7 +176,24 @@ function createServer(options = {}) {
   vm.runInContext(STORAGE_SRC, sandbox, { filename: "Storage.gs" });
   vm.runInContext(CODE_SRC, sandbox, { filename: "Code.gs" });
   vm.runInContext(API_SRC, sandbox, { filename: "Api.gs" });
-  return { g: sandbox, store, logRows, fetches, cache };
+  vm.runInContext(UPDATER_SRC, sandbox, { filename: "Updater.gs" });
+  return { g: sandbox, store, logRows, fetches, cache, sheets, dialogs, drive };
+}
+
+/** Apps Script's FileIterator shape over a plain array. */
+function iterate(list) {
+  let i = 0;
+  return {
+    hasNext: () => i < list.length,
+    next: () => {
+      const item = list[i++];
+      return item && item.getName ? item : { getName: () => item.name, setTrashed: () => {} };
+    },
+  };
+}
+
+function sha256(text) {
+  return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
 }
 
 function releases(...tagNames) {
@@ -802,5 +890,565 @@ describe("load path chunk cache (ticket 005)", () => {
       usersRows: [USERS_HEADER, ["ed@example.com", "editor", ""]],
     });
     expect(editor.g.api_devEvictChunk("ks_dl_b_x_1", 1)).toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Ticket 004 — the updater (SPEC §2.1 gate 6, ADR 0002)
+ * ------------------------------------------------------------------------ */
+
+const OWNER = "owner@example.com";
+const TAG = "build-9";
+const CDN = "https://cdn.example/keystone@{tag}";
+const BASE = "https://cdn.example/keystone@build-9";
+
+/** The six server files a release carries, as source text. */
+function serverSources(overrides = {}) {
+  return {
+    "dist/server/appsscript.json": '{"runtimeVersion":"V8"}',
+    "dist/server/Code.gs": "function doGet(){}",
+    "dist/server/Storage.gs": "function getSettings_(){}",
+    "dist/server/Api.gs": "function api_whoami(){}",
+    "dist/server/Updater.gs": "function ksUpdaterListTags(){}",
+    "dist/server/Index.html": "<html></html>",
+    ...overrides,
+  };
+}
+
+/**
+ * A release manifest over those sources, plus the fetchImpl that serves them
+ * and answers the Apps Script API. `corrupt` swaps a file's bytes after the
+ * manifest digest is computed, which is exactly the tampered-push case.
+ */
+function updaterFixture(options = {}) {
+  const {
+    sources = serverSources(),
+    serverList = Object.keys(serverSources()),
+    corrupt = null,
+    existingFiles = [
+      { name: "appsscript", type: "JSON", source: "{}" },
+      { name: "Code", type: "SERVER_JS", source: "// old" },
+      { name: "Scratch", type: "SERVER_JS", source: "// hand-written, not in any release" },
+    ],
+    digestOverrides = {},
+    versionNumber = 12,
+    testVersion = 11,
+    stableVersion = 7,
+    apiFailures = {},
+  } = options;
+
+  const manifest = {
+    tag: TAG,
+    commit: "abc",
+    schemaVersion: 1,
+    files: Object.keys(sources).map((path) => ({
+      path,
+      bytes: sources[path].length,
+      sha256: digestOverrides[path] || sha256(sources[path]),
+    })),
+    server: serverList,
+  };
+
+  const served = { ...sources };
+  if (corrupt) served[corrupt] = sources[corrupt] + " /* tampered after release */";
+
+  const api = { put: [], post: [], get: [] };
+
+  const fetchImpl = (url, params) => {
+    const method = String((params && params.method) || "get").toLowerCase();
+    if (url === `${BASE}/dist/manifest.json`) {
+      return { code: 200, body: JSON.stringify(manifest) };
+    }
+    if (url.startsWith(`${BASE}/`)) {
+      const path = url.slice(BASE.length + 1);
+      if (served[path] === undefined) return { code: 404, body: "not found" };
+      return { code: 200, body: served[path] };
+    }
+    if (url.includes("api.github.com")) {
+      return { code: 200, body: releases("build-9", "build-8", "build-7") };
+    }
+    if (url.includes("script.googleapis.com")) {
+      const tail = url.split("/projects/SCRIPT_ID")[1];
+      if (apiFailures[method + " " + tail]) return apiFailures[method + " " + tail];
+      if (method === "get" && tail === "/content") {
+        api.get.push(tail);
+        return { code: 200, body: JSON.stringify({ scriptId: "SCRIPT_ID", files: existingFiles }) };
+      }
+      if (method === "put" && tail === "/content") {
+        api.put.push({ tail, body: JSON.parse(params.payload) });
+        return { code: 200, body: JSON.stringify({ scriptId: "SCRIPT_ID" }) };
+      }
+      if (method === "post" && tail === "/versions") {
+        api.post.push({ tail, body: JSON.parse(params.payload) });
+        return { code: 200, body: JSON.stringify({ versionNumber }) };
+      }
+      if (method === "get" && tail.startsWith("/deployments/")) {
+        const isTest = tail.endsWith("TEST_DEP");
+        return {
+          code: 200,
+          body: JSON.stringify({
+            deploymentConfig: { versionNumber: isTest ? testVersion : stableVersion },
+          }),
+        };
+      }
+      if (method === "put" && tail.startsWith("/deployments/")) {
+        api.put.push({ tail, body: JSON.parse(params.payload) });
+        return { code: 200, body: JSON.stringify({ deploymentId: tail.split("/").pop() }) };
+      }
+    }
+    return { code: 404, body: "" };
+  };
+
+  return { manifest, sources, served, api, fetchImpl };
+}
+
+function updaterServer(fixture, overrides = {}) {
+  const settingsRows = overrides.settingsRows || [
+    SETTINGS_HEADER,
+    ["builds_folder_id", "FOLDER"],
+    ["github_repo", "rebelribbon/keystone"],
+    ["asset_base_url", CDN],
+    ["stable_tag", "build-8"],
+    ["test_url", "https://script.example/test/exec"],
+    ["stable_url", "https://script.example/stable/exec"],
+    ["testDeploymentId", "TEST_DEP"],
+    ["stableDeploymentId", "STABLE_DEP"],
+  ];
+  return createServer({
+    email: OWNER,
+    usersRows: [USERS_HEADER, [OWNER, "owner", ""]],
+    settingsRows,
+    fetchImpl: fixture.fetchImpl,
+    ...overrides,
+    settingsRows,
+  });
+}
+
+describe("updaterEntryForPath_ / mapServerEntries_", () => {
+  const { g } = createServer();
+
+  it("derives name and type from the extension", () => {
+    expect(g.updaterEntryForPath_("dist/server/Code.gs")).toEqual({
+      path: "dist/server/Code.gs",
+      name: "Code",
+      type: "SERVER_JS",
+    });
+    expect(g.updaterEntryForPath_("dist/server/Index.html")).toMatchObject({ name: "Index", type: "HTML" });
+    expect(g.updaterEntryForPath_("dist/server/appsscript.json")).toMatchObject({
+      name: "appsscript",
+      type: "JSON",
+    });
+  });
+
+  it("aborts on an extension it cannot classify", () => {
+    expect(() => g.updaterEntryForPath_("dist/server/notes.txt")).toThrow(/cannot classify/);
+    expect(() => g.updaterEntryForPath_("dist/server/README")).toThrow(/cannot classify/);
+    try {
+      g.updaterEntryForPath_("dist/server/notes.txt");
+    } catch (err) {
+      expect(err.ksCode).toBe("UPDATER_UNKNOWN_FILE");
+    }
+  });
+
+  it("aborts on an empty server list rather than writing an empty project", () => {
+    expect(() => g.mapServerEntries_([])).toThrow(/nothing to write/);
+    expect(() => g.mapServerEntries_(null)).toThrow(/nothing to write/);
+    try {
+      g.mapServerEntries_([]);
+    } catch (err) {
+      expect(err.ksCode).toBe("UPDATER_NO_SERVER_FILES");
+    }
+  });
+
+  it("maps a whole release list", () => {
+    const names = g.mapServerEntries_(Object.keys(serverSources())).map((e) => e.name);
+    expect(names).toEqual(["appsscript", "Code", "Storage", "Api", "Updater", "Index"]);
+  });
+});
+
+describe("mergeProjectFiles_", () => {
+  const { g } = createServer();
+
+  it("replaces matching entries and preserves unlisted ones", () => {
+    const merged = g.mergeProjectFiles_(
+      [
+        { name: "appsscript", type: "JSON", source: "{}" },
+        { name: "Code", type: "SERVER_JS", source: "// old" },
+        { name: "Scratch", type: "SERVER_JS", source: "// keep me" },
+      ],
+      [
+        { name: "appsscript", type: "JSON", source: '{"new":true}' },
+        { name: "Code", type: "SERVER_JS", source: "// new" },
+        { name: "Updater", type: "SERVER_JS", source: "// added" },
+      ]
+    );
+    expect(merged.map((f) => f.name)).toEqual(["appsscript", "Code", "Scratch", "Updater"]);
+    expect(merged.find((f) => f.name === "Scratch").source).toBe("// keep me");
+    expect(merged.find((f) => f.name === "Code").source).toBe("// new");
+  });
+
+  it("refuses a payload that would drop appsscript", () => {
+    expect(() =>
+      g.mergeProjectFiles_(
+        [{ name: "Code", type: "SERVER_JS", source: "// old" }],
+        [{ name: "Code", type: "SERVER_JS", source: "// new" }]
+      )
+    ).toThrow(/would not contain "appsscript"/);
+    try {
+      g.mergeProjectFiles_([], []);
+    } catch (err) {
+      expect(err.ksCode).toBe("UPDATER_MANIFEST_MISSING");
+    }
+  });
+});
+
+describe("updater pure helpers", () => {
+  const { g } = createServer();
+
+  it("converts signed digest bytes to hex", () => {
+    expect(g.bytesToHex_([0, 15, 16, -1, 127, -128])).toBe("000f10ff7f80");
+    expect(g.bytesToHex_([])).toBe("");
+    expect(g.bytesToHex_(null)).toBe("");
+  });
+
+  it("digests the manifest into a path → sha map", () => {
+    const digests = g.manifestDigests_({
+      files: [{ path: "dist/server/Code.gs", sha256: "AABB" }, { path: "", sha256: "x" }],
+    });
+    expect(digests).toEqual({ "dist/server/Code.gs": "aabb" });
+  });
+
+  it("fingerprints in a stable order regardless of input order", () => {
+    const digests = { "dist/server/Code.gs": "a".repeat(64), "dist/server/Api.gs": "b".repeat(64) };
+    const forward = g.fingerprintDigests_(
+      [{ path: "dist/server/Code.gs" }, { path: "dist/server/Api.gs" }],
+      digests
+    );
+    const reverse = g.fingerprintDigests_(
+      [{ path: "dist/server/Api.gs" }, { path: "dist/server/Code.gs" }],
+      digests
+    );
+    expect(forward).toBe(reverse);
+    expect(forward).toBe("Api.gs:bbbbbbbbbbbb Code.gs:aaaaaaaaaaaa");
+  });
+
+  it("names backups so they sort by timestamp and prunes to the ten newest", () => {
+    const name = g.backupFileName_(new Date("2026-09-19T22:43:08.123Z"));
+    expect(name).toBe("server-backup-2026-09-19T22-43-08-123Z.json");
+
+    const names = [];
+    for (let i = 1; i <= 13; i += 1) {
+      names.push(`server-backup-2026-09-${String(i).padStart(2, "0")}T00-00-00-000Z.json`);
+    }
+    names.push("b_something.ksb");
+    const stale = g.staleBackupNames_(names, 10);
+    expect(stale).toHaveLength(3);
+    expect(stale).toContain("server-backup-2026-09-01T00-00-00-000Z.json");
+    expect(stale).toContain("server-backup-2026-09-03T00-00-00-000Z.json");
+    expect(stale).not.toContain("server-backup-2026-09-04T00-00-00-000Z.json");
+    expect(stale).not.toContain("b_something.ksb");
+  });
+
+  it("reads release dates without re-implementing tag selection", () => {
+    const body = JSON.stringify([
+      { tag_name: "build-9", published_at: "2026-09-19T22:00:00Z" },
+      { tag_name: "v0.0.0", published_at: "2026-09-01T00:00:00Z" },
+    ]);
+    expect(g.releaseDatesByTag_(body)["build-9"]).toBe("2026-09-19T22:00:00Z");
+    expect(g.releaseDatesByTag_("not json")).toEqual({});
+  });
+
+  it("names the likely fix for the Apps Script API status codes that bite", () => {
+    expect(g.updaterApiHint_(403)).toMatch(/usersettings/);
+    expect(g.updaterApiHint_(401)).toMatch(/script\.deployments/);
+    expect(g.updaterApiHint_(404)).toMatch(/testDeploymentId/);
+    expect(g.updaterApiHint_(500)).toBe("");
+  });
+
+  it("pickNewestBuildTags_ still defaults to two and takes a limit", () => {
+    const body = releases("build-7", "build-8", "build-9", "build-10");
+    expect(g.pickNewestBuildTags_(body)).toEqual(["build-10", "build-9"]);
+    expect(g.pickNewestBuildTags_(body, 10)).toEqual(["build-10", "build-9", "build-8", "build-7"]);
+    expect(g.pickNewestBuildTags_(body, 0)).toEqual(["build-10", "build-9"]);
+  });
+});
+
+describe("performServerUpdate_ end to end", () => {
+  it("verifies, backs up, writes, versions, and repoints test", () => {
+    const fixture = updaterFixture();
+    const { g, logRows, drive } = updaterServer(fixture);
+
+    const result = g.ksUpdaterApplyTag(TAG);
+    expect(result.code).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, tag: TAG, version: 12, fileCount: 6, testRepointed: true });
+    expect(result.notes).toEqual([]);
+
+    // The backup is written before the PUT, and holds the OLD content.
+    expect(drive.files).toHaveLength(1);
+    expect(drive.files[0].name).toMatch(/^server-backup-.*\.json$/);
+    expect(JSON.parse(drive.files[0].content).files.map((f) => f.name)).toEqual([
+      "appsscript",
+      "Code",
+      "Scratch",
+    ]);
+
+    const contentPut = fixture.api.put.find((call) => call.tail === "/content");
+    expect(contentPut.body.files.map((f) => f.name)).toEqual([
+      "appsscript",
+      "Code",
+      "Scratch",
+      "Storage",
+      "Api",
+      "Updater",
+      "Index",
+    ]);
+    expect(contentPut.body.files.find((f) => f.name === "Scratch").source).toMatch(/hand-written/);
+    expect(contentPut.body.files.find((f) => f.name === "Index").type).toBe("HTML");
+
+    expect(fixture.api.post[0].body.description).toBe("build-9 via updater");
+    const repoint = fixture.api.put.find((call) => call.tail === "/deployments/TEST_DEP");
+    expect(repoint.body.deploymentConfig).toMatchObject({ versionNumber: 12, manifestFileName: "appsscript" });
+    expect(fixture.api.put.some((call) => call.tail === "/deployments/STABLE_DEP")).toBe(false);
+
+    const logged = logRows.find((row) => row[2] === "server_update");
+    expect(logged[3 + 1]).toMatch(/build-9 version=12 test=repointed files=6/);
+  });
+
+  it("records the tag and fingerprint in Settings", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    const result = g.ksUpdaterApplyTag(TAG);
+
+    const settings = g.getSettings_();
+    expect(settings.server_tag).toBe(TAG);
+    expect(settings.server_fingerprint).toBe(result.fingerprint);
+    expect(result.fingerprint).toMatch(/Code\.gs:[0-9a-f]{12}/);
+  });
+
+  it("never lets the OAuth token into a result, a log row, or a backup", () => {
+    const fixture = updaterFixture();
+    const { g, logRows, drive } = updaterServer(fixture);
+    const result = g.ksUpdaterApplyTag(TAG);
+
+    const surfaces = JSON.stringify(result) + JSON.stringify(logRows) + JSON.stringify(drive.files);
+    expect(surfaces).not.toContain("SECRET_TOKEN");
+    // It does reach the Authorization header, which is the only place it belongs.
+    expect(JSON.stringify(fixture.api)).not.toContain("SECRET_TOKEN");
+  });
+
+  it("aborts on a digest mismatch before anything is written", () => {
+    const fixture = updaterFixture({ corrupt: "dist/server/Code.gs" });
+    const { g, drive } = updaterServer(fixture);
+
+    const result = g.ksUpdaterApplyTag(TAG);
+    expect(result).toMatchObject({ code: "UPDATER_DIGEST_MISMATCH" });
+    expect(result.message).toMatch(/Nothing was written/);
+    expect(fixture.api.put).toHaveLength(0);
+    expect(fixture.api.post).toHaveLength(0);
+    expect(fixture.api.get).toHaveLength(0);
+    expect(drive.files).toHaveLength(0);
+  });
+
+  it("aborts when the manifest records no digest for a listed server file", () => {
+    const fixture = updaterFixture({
+      digestOverrides: {},
+      serverList: [...Object.keys(serverSources()), "dist/server/Ghost.gs"],
+    });
+    const { g } = updaterServer(fixture);
+    expect(g.ksUpdaterApplyTag(TAG)).toMatchObject({ code: "UPDATER_DIGEST_MISSING" });
+    expect(fixture.api.put).toHaveLength(0);
+  });
+
+  it("aborts on an empty server array with nothing written", () => {
+    const fixture = updaterFixture({ serverList: [] });
+    const { g, drive } = updaterServer(fixture);
+    expect(g.ksUpdaterApplyTag(TAG)).toMatchObject({ code: "UPDATER_NO_SERVER_FILES" });
+    expect(fixture.api.put).toHaveLength(0);
+    expect(drive.files).toHaveLength(0);
+  });
+
+  it("aborts on a server file with an unknown extension", () => {
+    const fixture = updaterFixture({
+      sources: serverSources({ "dist/server/notes.txt": "hello" }),
+      serverList: [...Object.keys(serverSources()), "dist/server/notes.txt"],
+    });
+    const { g } = updaterServer(fixture);
+    expect(g.ksUpdaterApplyTag(TAG)).toMatchObject({ code: "UPDATER_UNKNOWN_FILE" });
+    expect(fixture.api.put).toHaveLength(0);
+  });
+
+  it("rejects a tag that is not build-N", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    expect(g.ksUpdaterApplyTag("main")).toMatchObject({ code: "BAD_REQUEST" });
+    expect(g.ksUpdaterApplyTag("")).toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("still writes and versions when testDeploymentId is empty, and names the key", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture, {
+      settingsRows: [
+        SETTINGS_HEADER,
+        ["builds_folder_id", "FOLDER"],
+        ["asset_base_url", CDN],
+        ["github_repo", "rebelribbon/keystone"],
+      ],
+    });
+
+    const result = g.ksUpdaterApplyTag(TAG);
+    expect(result).toMatchObject({ ok: true, version: 12, testRepointed: false });
+    expect(fixture.api.put.some((call) => call.tail === "/content")).toBe(true);
+    expect(fixture.api.post).toHaveLength(1);
+    expect(fixture.api.put.some((call) => call.tail.startsWith("/deployments/"))).toBe(false);
+    expect(result.notes.join(" ")).toContain("testDeploymentId");
+    expect(result.notes.join(" ")).toContain("stableDeploymentId");
+  });
+
+  it("surfaces the Apps Script API hint when the API is switched off", () => {
+    const fixture = updaterFixture({
+      apiFailures: { "get /content": { code: 403, body: '{"error":{"message":"API disabled"}}' } },
+    });
+    const { g, drive } = updaterServer(fixture);
+    const result = g.ksUpdaterApplyTag(TAG);
+    expect(result).toMatchObject({ code: "UPDATER_API_FAILED" });
+    expect(result.message).toMatch(/usersettings/);
+    expect(drive.files).toHaveLength(0);
+  });
+
+  it("prunes backups to the ten newest", () => {
+    const fixture = updaterFixture();
+    const { g, drive } = updaterServer(fixture);
+    for (let i = 1; i <= 12; i += 1) {
+      drive.files.push({
+        name: `server-backup-2026-09-${String(i).padStart(2, "0")}T00-00-00-000Z.json`,
+        content: "{}",
+      });
+    }
+    g.ksUpdaterApplyTag(TAG);
+    // 12 pre-existing + 1 new = 13; the three oldest go.
+    expect(drive.trashed).toHaveLength(3);
+    expect(drive.trashed).toContain("server-backup-2026-09-01T00-00-00-000Z.json");
+    expect(drive.trashed).toContain("server-backup-2026-09-03T00-00-00-000Z.json");
+  });
+});
+
+describe("promote to stable", () => {
+  it("reports what each deployment serves", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    expect(g.ksUpdaterDeploymentState()).toMatchObject({
+      testVersion: 11,
+      stableVersion: 7,
+      testConfigured: true,
+      stableConfigured: true,
+      missingKeys: [],
+    });
+  });
+
+  it("repoints stable at the version already on test and creates nothing", () => {
+    const fixture = updaterFixture();
+    const { g, logRows } = updaterServer(fixture);
+    const result = g.ksUpdaterPromote(11);
+
+    expect(result).toMatchObject({ ok: true, version: 11, previousVersion: 7 });
+    expect(fixture.api.post).toHaveLength(0);
+    const repoint = fixture.api.put.find((call) => call.tail === "/deployments/STABLE_DEP");
+    expect(repoint.body.deploymentConfig.versionNumber).toBe(11);
+    expect(logRows.some((row) => row[2] === "server_promote")).toBe(true);
+  });
+
+  it("refuses when the version moved since the dialog read it", () => {
+    const fixture = updaterFixture({ testVersion: 14 });
+    const { g } = updaterServer(fixture);
+    const result = g.ksUpdaterPromote(11);
+    expect(result).toMatchObject({ code: "UPDATER_VERSION_MOVED" });
+    expect(result.message).toMatch(/Nothing was promoted/);
+    expect(fixture.api.put.some((call) => call.tail.startsWith("/deployments/"))).toBe(false);
+  });
+
+  it("names the missing Settings key rather than half-promoting", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture, {
+      settingsRows: [SETTINGS_HEADER, ["testDeploymentId", "TEST_DEP"]],
+    });
+    expect(g.ksUpdaterPromote(11)).toMatchObject({ code: "SETTING_MISSING" });
+    expect(g.ksUpdaterDeploymentState().missingKeys).toEqual(["stableDeploymentId"]);
+  });
+});
+
+describe("the updater is owner-only at every entry point", () => {
+  const ENTRY_POINTS = [
+    ["ksUpdaterListTags", []],
+    ["ksUpdaterApplyTag", [TAG]],
+    ["ksUpdaterDeploymentState", []],
+    ["ksUpdaterPromote", [11]],
+  ];
+
+  it("refuses an editor with FORBIDDEN and writes nothing", () => {
+    const fixture = updaterFixture();
+    const { g, drive } = updaterServer(fixture, {
+      email: "ed@example.com",
+      usersRows: [USERS_HEADER, ["ed@example.com", "editor", ""]],
+    });
+    for (const [name, args] of ENTRY_POINTS) {
+      expect(g[name](...args), name).toMatchObject({ code: "FORBIDDEN" });
+    }
+    expect(fixture.api.put).toHaveLength(0);
+    expect(fixture.api.post).toHaveLength(0);
+    expect(drive.files).toHaveLength(0);
+  });
+
+  it("refuses an unlisted account with ACCESS_DENIED", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture, { email: "nobody@example.com", usersRows: [USERS_HEADER] });
+    for (const [name, args] of ENTRY_POINTS) {
+      expect(g[name](...args), name).toMatchObject({ code: "ACCESS_DENIED" });
+    }
+    expect(fixture.api.put).toHaveLength(0);
+  });
+
+  it("toasts one line for a non-owner menu selection and opens no dialog", () => {
+    const fixture = updaterFixture();
+    const { g, dialogs, drive } = updaterServer(fixture, {
+      email: "ed@example.com",
+      usersRows: [USERS_HEADER, ["ed@example.com", "editor", ""]],
+    });
+    g.ksMenuUpdateServerCode();
+    g.ksMenuPromoteServerToStable();
+    expect(dialogs).toHaveLength(0);
+    expect(drive.toasts).toEqual(["Keystone: owner only.", "Keystone: owner only."]);
+  });
+});
+
+describe("the updater menu and dialogs", () => {
+  it("adds both items to the Keystone menu", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    g.onOpen();
+    expect(g.__menu.items.map((i) => i.label)).toEqual([
+      "Open test URL",
+      "Open stable URL",
+      "Update server code…",
+      "Promote server code to stable…",
+    ]);
+    // Every menu target must exist, or the item throws when clicked.
+    for (const item of g.__menu.items) expect(typeof g[item.fn]).toBe("function");
+  });
+
+  it("opens dialogs whose inline script actually parses", () => {
+    const fixture = updaterFixture();
+    const { g, dialogs } = updaterServer(fixture);
+    g.ksMenuUpdateServerCode();
+    g.ksMenuPromoteServerToStable();
+    expect(dialogs).toHaveLength(2);
+
+    for (const dialog of dialogs) {
+      const script = dialog.html.split("<script>")[1].split("</script>")[0];
+      // The dialog markup is assembled as a string in a .gs file, so a quoting
+      // slip is invisible until the owner clicks the menu item. Parse it here.
+      expect(() => new vm.Script(script)).not.toThrow();
+      expect(dialog.html).toContain("google.script.run");
+      expect(dialog.html).not.toContain("SECRET_TOKEN");
+    }
   });
 });

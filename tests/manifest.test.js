@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,5 +76,29 @@ describe("manifest.json", () => {
     }
     const paths = files.map((f) => f.path);
     expect(paths).toEqual([...paths].sort());
+  });
+
+  // The updater (ticket 004) reads `server`, then verifies each listed file
+  // against this same `files` array before it writes anything. If the two ever
+  // disagree, every update run aborts on a digest mismatch.
+  it("lists every src/server file under `server`, each with a matching digest", () => {
+    const { manifest, outDir } = defaultBuild;
+    const onDisk = readdirSync(join(root, "src/server")).sort();
+    expect(manifest.server).toEqual(onDisk.map((name) => `dist/server/${name}`));
+    expect(manifest.server).toContain("dist/server/Updater.gs");
+
+    const digests = new Map(manifest.files.map((f) => [f.path, f.sha256]));
+    for (const path of manifest.server) {
+      const bytes = readFileSync(join(outDir, path.replace(/^dist\//, "")));
+      expect(digests.get(path), path).toBe(createHash("sha256").update(bytes).digest("hex"));
+    }
+  });
+
+  // Every server file the release carries must be one the updater can classify,
+  // or a run aborts with UPDATER_UNKNOWN_FILE.
+  it("carries only extensions the updater maps to an Apps Script file type", () => {
+    for (const path of defaultBuild.manifest.server) {
+      expect(path).toMatch(/\.(gs|html|json)$/);
+    }
   });
 });
