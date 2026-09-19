@@ -82,7 +82,12 @@ Documentation only; no source or build changes.
   rewrites the web app URL to `/macros/u/N/s/...` and Drive answers instead of
   the script. It mimics a broken deployment; the tell is that no `doGet`
   execution appears in the log, because the request never reaches the script.
-- `docs/SETUP.md` Settings table: kept `stable_tag` at `build-1` as specified,
-  but noted that `build-1` predates `assets/`, so gate 2 fails if `?dev=gates`
-  is run against the stable URL at that tag. Run the gates on the test URL.
+- `docs/SETUP.md` Settings table: `stable_tag` now starts at the newest `build-*`
+  tag — the one verified in step 4 — instead of `build-1`, with the same check
+  that `dist/server/appsscript.json` resolves at it. Ticket 002 prescribed
+  `build-1` on the assumption that merging 002 would produce `build-2`; the
+  release workflow fires on every push to `main`, so that assumption does not
+  hold. `build-1`, `build-2`, and `build-3` carry no `dist/server/`, and
+  `build-1` also predates `assets/`, so gate 2 fails against the stable URL at
+  that tag.
 

@@ -177,20 +177,33 @@ the value in column B, starting at row 2 (row 1 is the `key | value` header).
 | `builds_folder_id` | the Drive folder ID from step 2 |
 | `github_repo` | `rebelribbon/keystone` |
 | `asset_base_url` | `https://cdn.jsdelivr.net/gh/rebelribbon/keystone@{tag}` |
-| `stable_tag` | `build-1` |
+| `stable_tag` | the newest `build-*` tag — the one you verified in step 4 |
 | `default_units` | `imperial` |
 | `region_multiplier` | `1.0` |
 
 Leave `{tag}` in `asset_base_url` exactly as written — the server substitutes the
 resolved build tag into it.
 
-`stable_tag` starts at `build-1` because that is the first release and the
-stable deployment should not move until you have tested a build. `build-1`
-carries all seven client bundles, so the cube renders on the stable URL. It
-predates `assets/`, though, so **gate 2 will fail if you run `?dev=gates`
-against the stable URL while `stable_tag` is `build-1`** — run the gates on the
-test URL, which always resolves the newest tag. Promote `stable_tag` to a newer
-build once you have tested it; that is the normal rollback lever (§3.2).
+`stable_tag` is the tag the **stable** deployment serves, and it must be a tag
+that actually carries everything the app loads. Use the same tag you verified in
+step 4. If you are filling this in later and no longer have it to hand, check it
+the same way — substitute your tag and open:
+
+```
+https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/appsscript.json
+```
+
+A 404 means that tag predates the server code; go back to step 4 and pick the
+newest release instead.
+
+Do not start this at `build-1`. Early tags are not usable here: `build-1`,
+`build-2`, and `build-3` have no `dist/server/`, and `build-1` also predates
+`assets/`, so **gate 2 fails against the stable URL at that tag** even though
+the cube itself renders.
+
+After this, `stable_tag` is the rollback lever (§3.2): test a new build on the
+test URL, then move this one cell to promote it. Changing it is the only step
+needed — no redeploy.
 
 Optional seventh key, only if the test URL will not load bundles from jsDelivr
 (see *If the cube does not appear* below):
