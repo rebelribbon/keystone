@@ -91,3 +91,47 @@ Documentation only; no source or build changes.
   `build-1` also predates `assets/`, so gate 2 fails against the stable URL at
   that tag.
 
+## 003 — Persistence API and Drive round-trip
+
+Closes the code half of Phase 0 gate 3 (spec §2.1 gate 3, §3, §6.4, §14.1, §14.2,
+§14.3; ADR 0001).
+
+Added:
+- `docs/decisions/0001-test-channel-uses-a-versioned-deployment.md`, verbatim.
+- `src/server/Api.gs`: the §14.2 surface — `api_whoami` (moved from `Code.gs`),
+  `api_listBuilds`, `api_beginSave`, `api_saveChunk`, `api_commitSave`,
+  `api_loadBuildInfo`, `api_loadChunk`, `api_deleteBuild`, `api_getSettings`,
+  `api_setSetting`. Every one is auth-first, wrapped in try/catch, returns a
+  structured `{ code, message }`, and writes a `Log` row on writes only.
+  `api_commitSave` runs under `LockService` and applies the conflict-copy rule.
+- `src/server/Storage.gs`: Drive and `Builds`-tab helpers — `getBuildsFolder_`,
+  `getTrashFolder_`, `readBuildRow_`, `writeBuildRow_`, `appendBuildRow_`,
+  `listBuildRows_`, `writeBuildFile_`, `readBuildFile_`, `moveBuildFileToTrash_`,
+  plus pure `rowToBuild_`, `buildToRow_`, `isConflict_`. Rows map by header name,
+  never by column index.
+- `src/client/persistence/`: `codec.js` (gzip/gunzip via CompressionStream,
+  windowed base64 that does not overflow the stack at 5 MB), `chunker.js` (the
+  1.5 MB → 750 KB → 375 KB → 187 KB → 100 KB ladder), `transport.js` (the only
+  file naming `google.script.run`; timeout, one retry, structured errors
+  preserved), `save.js`, `load.js`. Exposed as `KS.persistence`.
+- `?dev=gate3`: owner-only harness that round-trips a deterministic 5 MB buffer
+  and reports both digests, timings, final chunk size, and chunk count.
+- `tests/codec.test.js` and `tests/chunker.test.js`; `tests/server-logic.test.js`
+  grew to cover the Builds helpers, the conflict rule, the chunk cap, and the
+  auth gate on every `api_*` function.
+- `docs/SETUP.md`: two versioned `/exec` deployments, `?c=test` on the test
+  bookmark, `test_url` and `stable_url` settings, and gate-run guidance.
+
+Changed:
+- **ADR 0001.** `resolveChannel_(serviceUrl, paramChannel, role)` becomes
+  `resolveChannel_(params)`: the channel is `?c=test` or `?c=stable`, defaulting
+  to stable, with no service-URL inspection and no role check. `serviceUrlVariants_`
+  is gone and `withChannelParam_` replaces it. Every `/dev` reference is out of
+  `docs/SETUP.md` as an entry point. `?tag=` and `?dev=` stay owner-only.
+- **`api_getBundle_` renamed to `api_getBundle`.** Apps Script refuses to expose a
+  name ending in an underscore to `google.script.run`, so the client-callable
+  path the §2.1 gate 1 fallback is meant to offer was unreachable. Renaming it
+  also makes it reachable by any signed-in Google account, so it now carries the
+  same `Users` gate as the rest of the API and validates both arguments against
+  allowlists rather than letting them steer the fetch URL.
+

@@ -17,4 +17,14 @@ Cuts made intentionally, with the reason. (Hard rule: no shipped TODOs — cuts 
   signals for "HtmlService blocked this script tag" are all timing heuristics, and a
   wrong guess doubles load time on every page view. If gate 1 fails on `cdn`, the owner
   flips one cell and re-tests.
+- **`api_getThumb` (§14.2)** — deferred from ticket 003. No thumbnail pipeline exists
+  until Phase 4 (§13.3), so `thumbFileId` is always blank today. A getter for data
+  nothing produces would ship untested and unexercised.
+- **`api_duplicateBuild` (§14.2)** — deferred from ticket 003. It is only reachable
+  from the builds gallery, which is Phase 1, and its naming and conflict behavior
+  should be written against that screen rather than guessed ahead of it.
+- **`api_exportCost` (§15)** — deferred from ticket 003. The cost engine is Phase 4.
+- **Autosave, IndexedDB recovery copies, export/import, and screenshots (§14.3)** —
+  deferred from ticket 003. All four serialize the Store, which does not exist until
+  Phase 1. Gate 3 uses a dummy buffer precisely so the transport can be proven first.
 

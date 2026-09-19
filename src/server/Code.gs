@@ -6,7 +6,7 @@
  * The Builder cannot deploy or run Apps Script from a cloud session, so every
  * decision this file makes is factored into a pure helper with no Apps Script
  * globals in its body: pickNewestBuildTags_, buildBaseUrl_, resolveChannel_,
- * decideAccess_, applyTagOverride_, serviceUrlVariants_, splitChunks_,
+ * decideAccess_, applyTagOverride_, withChannelParam_, splitChunks_,
  * escapeHtml_, toSafeJson_. tests/server-logic.test.js evaluates this file as
  * text and calls them directly.
  */
@@ -82,21 +82,20 @@ function buildBaseUrl_(assetBaseUrl, tag) {
 }
 
 /**
- * Pure. `test` on the /dev deployment, `stable` otherwise. A `?channel=`
- * parameter overrides that only for role `owner`; anyone else's is ignored
- * silently.
- * @param {string} serviceUrl
- * @param {string} paramChannel
- * @param {?string} role
+ * Pure. The channel comes from an explicit `?c=` parameter (ADR 0001).
+ *
+ * The /dev URL is no longer part of the deployment model: Google rewrites the
+ * path to /macros/u/N/s/... when the caller is signed into several accounts and
+ * the request never reaches doGet, so service-URL inspection cannot be relied
+ * on. `?c=` is not owner-restricted — it selects only which public jsDelivr
+ * bundle the page loads, and both bundles are public artifacts of a public repo.
+ * @param {Object} params the query parameters
  * @return {string} 'test' | 'stable'
  */
-function resolveChannel_(serviceUrl, paramChannel, role) {
-  var url = String(serviceUrl == null ? '' : serviceUrl).trim().replace(/\/+$/, '');
-  var channel = /\/dev$/.test(url) ? 'test' : 'stable';
-  if (role !== 'owner') return channel;
-  var requested = String(paramChannel == null ? '' : paramChannel).trim().toLowerCase();
-  if (requested === 'test' || requested === 'stable') return requested;
-  return channel;
+function resolveChannel_(params) {
+  var source = params || {};
+  var requested = String(source.c == null ? '' : source.c).trim().toLowerCase();
+  return requested === 'test' ? 'test' : 'stable';
 }
 
 /**
@@ -140,13 +139,16 @@ function applyTagOverride_(release, paramTag, role) {
 }
 
 /**
- * Pure. The /dev and /exec forms of a web app URL.
- * @param {string} serviceUrl
- * @return {{test: string, stable: string}}
+ * Pure. Append the channel parameter to a deployment URL (ADR 0001).
+ * The stable channel is the default, so it carries no parameter.
+ * @param {string} url
+ * @param {string} channel
+ * @return {string}
  */
-function serviceUrlVariants_(serviceUrl) {
-  var base = String(serviceUrl == null ? '' : serviceUrl).trim().replace(/\/+$/, '').replace(/\/(dev|exec)$/, '');
-  return { test: base + '/dev', stable: base + '/exec' };
+function withChannelParam_(url, channel) {
+  var base = String(url == null ? '' : url).trim();
+  if (!base || channel !== 'test') return base;
+  return base + (base.indexOf('?') === -1 ? '?' : '&') + 'c=test';
 }
 
 /**
@@ -322,14 +324,7 @@ function doGet(e) {
     return renderErrorScreen_('Keystone could not read the Settings tab: ' + err);
   }
 
-  var serviceUrl = '';
-  try {
-    serviceUrl = String(ScriptApp.getService().getUrl() || '');
-  } catch (err) {
-    serviceUrl = '';
-  }
-
-  var channel = resolveChannel_(serviceUrl, params.channel, access.role);
+  var channel = resolveChannel_(params);
   var release = applyTagOverride_(resolveRelease_(channel, settings), params.tag, access.role);
   if (release.error) return renderErrorScreen_(release.error);
 
@@ -348,12 +343,14 @@ function doGet(e) {
     degradedReason: release.degradedReason,
     loaderMode: loaderMode,
     devGates: params.dev === 'gates' && access.role === 'owner',
+    devGate3: params.dev === 'gate3' && access.role === 'owner',
     bundles: KS_CLIENT_BUNDLES,
     firstRenderBudgetMs: KS_FIRST_RENDER_BUDGET_MS
   });
   template.base = base;
   template.loaderMode = loaderMode;
   template.devGates = params.dev === 'gates' && access.role === 'owner';
+  template.devGate3 = params.dev === 'gate3' && access.role === 'owner';
   template.inlineStyles = loaderMode === 'inline' ? getInlineAsset_(base, 'styles.css') : '';
   template.inlineBundles = loaderMode === 'inline' ? inlineBundleSources_(release.tag, base) : [];
 
@@ -370,28 +367,6 @@ function doGet(e) {
  */
 function include(filename) {
   return HtmlService.createHtmlOutputFromFile(filename).getContent();
-}
-
-/**
- * Who is signed in (SPEC §14.2).
- * @return {{email: string, role: string}|{code: string, message: string}}
- */
-function api_whoami() {
-  var email = activeEmail_();
-  var role = null;
-  try {
-    role = getUserRole_(email);
-  } catch (err) {
-    role = null;
-  }
-  var access = decideAccess_(email, role);
-  if (!access.allowed) {
-    return {
-      code: 'ACCESS_DENIED',
-      message: 'This Google account is not on the Keystone access list.'
-    };
-  }
-  return { email: access.email, role: access.role };
 }
 
 /* -------------------------------------------------------------------------
@@ -413,11 +388,31 @@ function bundleCacheKey_(tag, file, index) {
  * CacheService (6 h TTL) so it survives the per-key size cap. Returns the
  * chunks. This is the §2.1 gate 1 fallback, reached only when the Settings key
  * `loader_mode` is `inline`.
+ *
+ * The name carries no trailing underscore on purpose: Apps Script will not
+ * expose `name_` to google.script.run, which made the client-callable path this
+ * function is meant to serve unreachable as shipped in ticket 002.
  * @param {string} tag
  * @param {string} file
  * @return {{ok: boolean, tag: string, file: string, total: number, chunks: !Array<string>}|{code: string, message: string}}
  */
-function api_getBundle_(tag, file) {
+function api_getBundle(tag, file) {
+  // Making this callable by google.script.run also makes it reachable by any
+  // signed-in Google account, so it needs the same gate as the rest of the API
+  // and its two arguments must not be able to steer the fetch anywhere else.
+  var access = decideAccess_(activeEmail_(), (function () {
+    try { return getUserRole_(activeEmail_()); } catch (err) { return null; }
+  })());
+  if (!access.allowed) {
+    return { code: 'ACCESS_DENIED', message: 'This Google account is not on the Keystone access list.' };
+  }
+  if (!/^build-\d+$/.test(String(tag == null ? '' : tag).trim())) {
+    return { code: 'BAD_REQUEST', message: 'tag must be a build-<number> release tag.' };
+  }
+  if (KS_CLIENT_BUNDLES.indexOf(String(file == null ? '' : file)) === -1) {
+    return { code: 'BAD_REQUEST', message: 'file must be one of the published client bundles.' };
+  }
+
   var cache = CacheService.getScriptCache();
   var countKey = bundleCacheKey_(tag, file, 'count');
   var countHit = cache.get(countKey);
@@ -464,7 +459,7 @@ function api_getBundle_(tag, file) {
  * @return {string}
  */
 function getBundleSource_(tag, file) {
-  var result = api_getBundle_(tag, file);
+  var result = api_getBundle(tag, file);
   if (!result || !result.ok) {
     throw new Error(result && result.message ? result.message : 'Could not fetch ' + file + '.');
   }
@@ -580,36 +575,48 @@ function onOpen() {
     .addToUi();
 }
 
-/** Menu: show the /dev URL. */
+/** Menu: show the test deployment URL, carrying ?c=test. */
 function ksMenuOpenTestUrl() {
-  showServiceUrlDialog_('test');
+  showDeploymentUrlDialog_('test');
 }
 
-/** Menu: show the /exec URL. */
+/** Menu: show the stable deployment URL. */
 function ksMenuOpenStableUrl() {
-  showServiceUrlDialog_('stable');
+  showDeploymentUrlDialog_('stable');
 }
 
 /**
- * Apps Script cannot navigate the parent tab, so the menu shows a modal with a
- * clickable link instead.
+ * Show a deployment URL in a modal, because Apps Script cannot navigate the
+ * parent tab.
+ *
+ * Both channels are versioned /exec deployments now (ADR 0001), and a script
+ * cannot discover the URL of a deployment other than the one serving it, so the
+ * two URLs are recorded in Settings as `test_url` and `stable_url`. The serving
+ * deployment's own URL is the fallback while those are still blank.
  * @param {string} which 'test' | 'stable'
  */
-function showServiceUrlDialog_(which) {
+function showDeploymentUrlDialog_(which) {
   var ui = SpreadsheetApp.getUi();
-  var serviceUrl = '';
-  try {
-    serviceUrl = String(ScriptApp.getService().getUrl() || '');
-  } catch (err) {
-    serviceUrl = '';
+  var configured = String(getSetting_(which === 'stable' ? 'stable_url' : 'test_url', '')).trim();
+
+  if (!configured) {
+    try {
+      configured = String(ScriptApp.getService().getUrl() || '');
+    } catch (err) {
+      configured = '';
+    }
   }
-  if (!serviceUrl) {
-    ui.alert('Keystone', 'This project has no web app deployment yet. Deploy it first (see docs/SETUP.md).', ui.ButtonSet.OK);
+  if (!configured) {
+    ui.alert(
+      'Keystone',
+      'No deployment URL is recorded yet. Deploy the web app and put its URL in the Settings tab as "' +
+        (which === 'stable' ? 'stable_url' : 'test_url') + '" (see docs/SETUP.md).',
+      ui.ButtonSet.OK
+    );
     return;
   }
 
-  var variants = serviceUrlVariants_(serviceUrl);
-  var url = which === 'stable' ? variants.stable : variants.test;
+  var url = withChannelParam_(configured, which);
   var label = which === 'stable' ? 'Stable URL' : 'Test URL';
   var html = [
     '<style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#27303A;',
@@ -617,8 +624,8 @@ function showServiceUrlDialog_(which) {
     'a{color:#0F7C8C;word-break:break-all}p{margin:0 0 10px}</style>',
     '<p>' + escapeHtml_(label) + ':</p>',
     '<p><a href="' + escapeHtml_(url) + '" target="_blank" rel="noopener">' + escapeHtml_(url) + '</a></p>',
-    '<p style="color:#5c6672">Opens in a new tab.</p>'
+    '<p style="color:#5c6672">Opens in a new tab. Bookmark this exact URL.</p>'
   ].join('');
 
-  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(540).setHeight(190), 'Keystone — ' + label);
+  ui.showModalDialog(HtmlService.createHtmlOutput(html).setWidth(540).setHeight(200), 'Keystone — ' + label);
 }

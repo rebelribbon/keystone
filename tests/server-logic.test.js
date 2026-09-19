@@ -10,6 +10,7 @@ import vm from "node:vm";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const STORAGE_SRC = readFileSync(join(root, "src/server/Storage.gs"), "utf8");
 const CODE_SRC = readFileSync(join(root, "src/server/Code.gs"), "utf8");
+const API_SRC = readFileSync(join(root, "src/server/Api.gs"), "utf8");
 
 const SETTINGS_HEADER = ["key", "value"];
 const USERS_HEADER = ["email", "role", "addedOn"];
@@ -23,7 +24,8 @@ function createServer(options = {}) {
     settingsRows = [SETTINGS_HEADER],
     usersRows = [USERS_HEADER],
     email = "",
-    serviceUrl = "https://script.google.com/macros/s/AKfy/dev",
+    buildsRows = null,
+    serviceUrl = "https://script.google.com/macros/s/AKfy/exec",
     fetchImpl = () => ({ code: 404, body: "" }),
   } = options;
 
@@ -36,6 +38,13 @@ function createServer(options = {}) {
     Users: { getDataRange: () => ({ getValues: () => usersRows }) },
     Log: { appendRow: (row) => logRows.push(row) },
   };
+  if (buildsRows) {
+    sheets.Builds = {
+      getDataRange: () => ({ getValues: () => buildsRows }),
+      appendRow: (row) => buildsRows.push(row),
+      getRange: () => ({ setValues: () => {} }),
+    };
+  }
 
   const cache = {
     get: (k) => (store.has(k) ? store.get(k) : null),
@@ -74,13 +83,28 @@ function createServer(options = {}) {
     Utilities: {
       base64Encode: (bytes) => Buffer.from(bytes).toString("base64"),
       base64Decode: (text) => Buffer.from(text, "base64"),
-      newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes).toString("utf8") }),
+      newBlob: (bytes) => ({
+        getDataAsString: () => Buffer.from(bytes).toString("utf8"),
+        getBytes: () => bytes,
+      }),
+    },
+    LockService: {
+      getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }),
+    },
+    DriveApp: {
+      getFolderById: () => {
+        throw new Error("no Drive in the sandbox");
+      },
+      getFileById: () => {
+        throw new Error("no Drive in the sandbox");
+      },
     },
   };
 
   vm.createContext(sandbox);
   vm.runInContext(STORAGE_SRC, sandbox, { filename: "Storage.gs" });
   vm.runInContext(CODE_SRC, sandbox, { filename: "Code.gs" });
+  vm.runInContext(API_SRC, sandbox, { filename: "Api.gs" });
   return { g: sandbox, store, logRows, fetches };
 }
 
@@ -136,29 +160,36 @@ describe("buildBaseUrl_", () => {
   });
 });
 
-describe("resolveChannel_", () => {
+describe("resolveChannel_ (ADR 0001)", () => {
   const { g } = createServer();
-  const DEV = "https://script.google.com/macros/s/AKfy/dev";
-  const EXEC = "https://script.google.com/macros/s/AKfy/exec";
 
-  it("maps /dev to test and /exec to stable", () => {
-    expect(g.resolveChannel_(DEV, "", null)).toBe("test");
-    expect(g.resolveChannel_(EXEC, "", null)).toBe("stable");
+  it("reads the channel from ?c=", () => {
+    expect(g.resolveChannel_({ c: "test" })).toBe("test");
+    expect(g.resolveChannel_({ c: "stable" })).toBe("stable");
   });
 
-  it("honors ?channel= for an owner", () => {
-    expect(g.resolveChannel_(DEV, "stable", "owner")).toBe("stable");
-    expect(g.resolveChannel_(EXEC, "test", "owner")).toBe("test");
+  it("defaults to stable when the parameter is absent or unrecognized", () => {
+    expect(g.resolveChannel_({})).toBe("stable");
+    expect(g.resolveChannel_(null)).toBe("stable");
+    expect(g.resolveChannel_(undefined)).toBe("stable");
+    expect(g.resolveChannel_({ c: "banana" })).toBe("stable");
+    expect(g.resolveChannel_({ c: "" })).toBe("stable");
   });
 
-  it("ignores ?channel= for editor and viewer", () => {
-    expect(g.resolveChannel_(DEV, "stable", "editor")).toBe("test");
-    expect(g.resolveChannel_(DEV, "stable", "viewer")).toBe("test");
-    expect(g.resolveChannel_(EXEC, "test", "editor")).toBe("stable");
+  it("is case- and whitespace-insensitive", () => {
+    expect(g.resolveChannel_({ c: "  TEST " })).toBe("test");
   });
 
-  it("ignores an unrecognized channel value even for an owner", () => {
-    expect(g.resolveChannel_(DEV, "banana", "owner")).toBe("test");
+  it("honors the value regardless of role, since it selects only a public bundle", () => {
+    // The signature no longer takes a role at all, which is the point: nothing
+    // about ?c= is privileged (ADR 0001 decision 3).
+    expect(g.resolveChannel_.length).toBe(1);
+    expect(g.resolveChannel_({ c: "test" })).toBe("test");
+  });
+
+  it("ignores the service URL entirely, including a /dev one", () => {
+    expect(g.resolveChannel_({ c: "stable", serviceUrl: "https://script.google.com/macros/s/AKfy/dev" }))
+      .toBe("stable");
   });
 });
 
@@ -411,11 +442,181 @@ describe("page-safety helpers", () => {
     expect(g.splitChunks_("", 4)).toEqual([]);
   });
 
-  it("serviceUrlVariants_ derives both deployment URLs", () => {
-    const v = g.serviceUrlVariants_("https://script.google.com/macros/s/AKfy/dev");
-    expect(v.test).toBe("https://script.google.com/macros/s/AKfy/dev");
-    expect(v.stable).toBe("https://script.google.com/macros/s/AKfy/exec");
-    expect(g.serviceUrlVariants_("https://script.google.com/macros/s/AKfy/exec").test)
-      .toBe("https://script.google.com/macros/s/AKfy/dev");
+  it("withChannelParam_ appends ?c=test only for the test channel", () => {
+    const base = "https://script.google.com/macros/s/AKfy/exec";
+    expect(g.withChannelParam_(base, "test")).toBe(base + "?c=test");
+    expect(g.withChannelParam_(base, "stable")).toBe(base);
+    expect(g.withChannelParam_(base + "?x=1", "test")).toBe(base + "?x=1&c=test");
+    expect(g.withChannelParam_("", "test")).toBe("");
+  });
+});
+
+const BUILDS_HEADER = [
+  "buildId", "name", "owner", "primaryStyle", "levels", "estCostLow", "estCostHigh",
+  "created", "updated", "driveFileId", "thumbFileId", "schema", "deleted",
+];
+
+describe("rowToBuild_ / buildToRow_", () => {
+  const { g } = createServer();
+
+  it("maps a row onto an object by header name", () => {
+    const row = ["b_1", "Hill Country", "a@b.com", "style.spanish.texas_hill_country", 2,
+                 100, 200, "2026-01-01", "2026-01-02", "file1", "thumb1", 1, ""];
+    expect(g.rowToBuild_(BUILDS_HEADER, row)).toMatchObject({
+      buildId: "b_1", name: "Hill Country", driveFileId: "file1", schema: 1, deleted: "",
+    });
+  });
+
+  it("is independent of column order", () => {
+    const shuffled = ["deleted", "name", "buildId", "updated"];
+    const build = g.rowToBuild_(shuffled, ["true", "Cabin", "b_9", "2026-02-02"]);
+    expect(build).toEqual({ deleted: "true", name: "Cabin", buildId: "b_9", updated: "2026-02-02" });
+    // And a write lays the values back out in that same order.
+    expect(g.buildToRow_(shuffled, build)).toEqual(["true", "Cabin", "b_9", "2026-02-02"]);
+  });
+
+  it("round-trips through the sheet's own header order", () => {
+    const build = { buildId: "b_2", name: "Ranch", updated: "2026-03-03", deleted: "" };
+    const row = g.buildToRow_(BUILDS_HEADER, build);
+    expect(row).toHaveLength(BUILDS_HEADER.length);
+    expect(g.rowToBuild_(BUILDS_HEADER, row)).toMatchObject(build);
+  });
+
+  it("fills missing columns blank rather than shifting the row", () => {
+    const row = g.buildToRow_(BUILDS_HEADER, { buildId: "b_3" });
+    expect(row).toHaveLength(BUILDS_HEADER.length);
+    expect(row[0]).toBe("b_3");
+    expect(row.slice(1).every((cell) => cell === "")).toBe(true);
+  });
+
+  it("tolerates a row shorter than the header and blank header cells", () => {
+    expect(g.rowToBuild_(BUILDS_HEADER, ["b_4", "Short"])).toMatchObject({
+      buildId: "b_4", name: "Short", deleted: "",
+    });
+    expect(g.rowToBuild_(["buildId", "", "name"], ["b_5", "junk", "N"])).toEqual({
+      buildId: "b_5", name: "N",
+    });
+  });
+
+  it("ignores object keys the header does not name", () => {
+    expect(g.buildToRow_(["buildId"], { buildId: "b_6", secret: "nope" })).toEqual(["b_6"]);
+  });
+});
+
+describe("isConflict_", () => {
+  const { g } = createServer();
+  const earlier = "2026-09-19T10:00:00Z";
+  const later = "2026-09-19T11:00:00Z";
+
+  it("is a conflict when the server row is newer than what the client based on", () => {
+    expect(g.isConflict_(earlier, later)).toBe(true);
+  });
+
+  it("is not a conflict when the client is current or ahead", () => {
+    expect(g.isConflict_(later, earlier)).toBe(false);
+    expect(g.isConflict_(later, later)).toBe(false);
+  });
+
+  it("treats equal timestamps as no conflict", () => {
+    expect(g.isConflict_(earlier, earlier)).toBe(false);
+  });
+
+  it("refuses to clobber when the client sends no baseUpdated", () => {
+    expect(g.isConflict_(undefined, later)).toBe(true);
+    expect(g.isConflict_("", later)).toBe(true);
+    expect(g.isConflict_(null, later)).toBe(true);
+  });
+
+  it("is not a conflict when the server row has no timestamp to compare", () => {
+    expect(g.isConflict_(earlier, "")).toBe(false);
+    expect(g.isConflict_(undefined, undefined)).toBe(false);
+  });
+
+  it("accepts Date objects on either side", () => {
+    expect(g.isConflict_(new Date(earlier), new Date(later))).toBe(true);
+    expect(g.isConflict_(new Date(later), new Date(earlier))).toBe(false);
+  });
+});
+
+describe("listBuildRows_", () => {
+  it("returns non-deleted builds newest first", () => {
+    const { g } = createServer({
+      buildsRows: [
+        BUILDS_HEADER,
+        ["b_old", "Old", "a@b.com", "", 1, "", "", "", "2026-01-01T00:00:00Z", "f1", "", 1, ""],
+        ["b_gone", "Gone", "a@b.com", "", 1, "", "", "", "2026-05-01T00:00:00Z", "f2", "", 1, "true"],
+        ["b_new", "New", "a@b.com", "", 1, "", "", "", "2026-03-01T00:00:00Z", "f3", "", 1, ""],
+      ],
+    });
+    const builds = g.listBuildRows_();
+    expect(builds.map((b) => b.buildId)).toEqual(["b_new", "b_old"]);
+  });
+});
+
+describe("every api_* function is behind the Users gate", () => {
+  // Acceptance: an account with no Users row gets denied on every api_* call,
+  // not just on doGet.
+  const CALLS = [
+    ["api_whoami", []],
+    ["api_listBuilds", []],
+    ["api_beginSave", [null, {}]],
+    ["api_saveChunk", ["u_1", 0, "AAAA"]],
+    ["api_commitSave", ["u_1", 1, null]],
+    ["api_loadBuildInfo", ["b_1"]],
+    ["api_loadChunk", ["b_1", 0]],
+    ["api_deleteBuild", ["b_1"]],
+    ["api_getSettings", []],
+    ["api_setSetting", ["stable_tag", "build-9"]],
+    ["api_getBundle", ["build-5", "engine.js"]],
+  ];
+
+  it.each(CALLS)("%s denies an unlisted account", (name, args) => {
+    const { g } = createServer({
+      email: "stranger@example.com",
+      usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]],
+    });
+    expect(typeof g[name], `${name} must exist`).toBe("function");
+    expect(g[name].apply(null, args)).toMatchObject({ code: "ACCESS_DENIED" });
+  });
+
+  it.each(CALLS)("%s denies a request with no resolvable account", (name, args) => {
+    const { g } = createServer({ email: "" });
+    expect(g[name].apply(null, args)).toMatchObject({ code: "ACCESS_DENIED" });
+  });
+
+  it("exposes no api_ function whose name Apps Script would hide from the client", () => {
+    // A trailing underscore makes a function uncallable by google.script.run —
+    // the defect that left loader_mode: inline unreachable in ticket 002.
+    const hidden = Object.keys(createServer().g).filter((k) => /^api_.*_$/.test(k));
+    expect(hidden).toEqual([]);
+  });
+});
+
+describe("api_saveChunk chunk cap", () => {
+  const OWNER = { email: "owner@example.com", usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]] };
+
+  it("rejects an oversized chunk with CHUNK_TOO_LARGE so the client can halve", () => {
+    const { g } = createServer(OWNER);
+    const begun = g.api_beginSave(null, { name: "x" });
+    const oversized = "A".repeat(100001);
+    expect(g.api_saveChunk(begun.uploadId, 0, oversized)).toMatchObject({ code: "CHUNK_TOO_LARGE" });
+  });
+
+  it("accepts a chunk exactly at the floor size", () => {
+    const { g } = createServer(OWNER);
+    const begun = g.api_beginSave(null, { name: "x" });
+    expect(g.api_saveChunk(begun.uploadId, 0, "A".repeat(100000))).toEqual({ ok: true });
+  });
+
+  it("rejects a chunk for an unknown or expired upload", () => {
+    const { g } = createServer(OWNER);
+    expect(g.api_saveChunk("u_nope", 0, "AAAA")).toMatchObject({ code: "UPLOAD_EXPIRED" });
+  });
+
+  it("api_getBundle refuses arguments that could steer the fetch", () => {
+    const { g } = createServer(OWNER);
+    expect(g.api_getBundle("../../etc", "engine.js")).toMatchObject({ code: "BAD_REQUEST" });
+    expect(g.api_getBundle("build-5", "../../../secrets")).toMatchObject({ code: "BAD_REQUEST" });
+    expect(g.api_getBundle("build-5", "styles.css")).toMatchObject({ code: "BAD_REQUEST" });
   });
 });
