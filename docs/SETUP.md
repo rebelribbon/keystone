@@ -137,9 +137,14 @@ matches files by name when it writes.
 3. Go back to the editor. Open `appsscript.json`, select all, and paste in the
    `appsscript.json` you copied. Save.
 
-It sets the V8 runtime, the timezone, the six OAuth scopes, and the web app
+It sets the V8 runtime, the timezone, the seven OAuth scopes, and the web app
 access settings (SPEC §2.2, ADR 0002). Nothing else needs those scopes, so do
 not add any.
+
+`script.container.ui` is one of them. Without it the **Keystone** menu still
+appears, but every menu item fails the moment it opens a dialog with *Specified
+permissions are not sufficient to call Ui.showModalDialog*. SPEC §2.2's scope
+list does not mention it; see the troubleshooting entry below.
 
 ---
 
@@ -173,7 +178,7 @@ reaches the script. Do not use it.
 4. Click **Deploy**.
 5. Authorize when prompted. You will see *Google hasn't verified this app* —
    this is your own script. Click **Advanced → Go to Keystone (unsafe)** and
-   **Allow**. Review the scopes; they should be the six from step 6.
+   **Allow**. Review the scopes; they should be the seven from step 6.
 6. Copy the **Web app URL**. It ends in `/exec`. This is your **test URL**.
 7. **Copy the deployment ID too.** *Deploy → Manage deployments*, select this
    deployment, and copy the long **Deployment ID** string (it starts `AKfy...`
@@ -350,8 +355,9 @@ having a stable channel, so there is deliberately no way to promote
 automatically (ADR 0002).
 
 **The first run after ticket 004 will ask you to authorize again.** ADR 0002
-adds the `script.deployments` scope, and Google re-prompts whenever the scope
-list changes. Everyone else sees the same prompt the next time they open the web
+adds the `script.deployments` scope and the fix for the dialog permission error
+adds `script.container.ui`, and Google re-prompts whenever the scope list
+changes. Everyone else sees the same prompt the next time they open the web
 app. It is expected, it is not a failure, and the consent screen will again say
 *Google hasn't verified this app* — it is your own script.
 
@@ -454,6 +460,14 @@ that is the check doing its job.
 `testDeploymentId` is empty in `Settings`. The files and the version were still
 written, so fill the key in from *Deploy → Manage deployments* and run the update
 again — it is safe to repeat.
+
+**"Specified permissions are not sufficient to call Ui.showModalDialog."**
+The manifest is missing `https://www.googleapis.com/auth/script.container.ui`.
+Every `Keystone` menu item needs it — the two URL dialogs from ticket 002 as well
+as the two updater dialogs. The menu appears without it, which is what makes this
+confusing: the scope is only checked when a dialog actually opens. Re-paste
+`appsscript.json` from a tag at or after `build-11`, reload the Sheet, and
+re-authorize.
 
 **The Keystone menu shows "owner only".**
 Updater items are owner-only. Your row in `Users` has role `editor` or `viewer`,

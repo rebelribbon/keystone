@@ -249,3 +249,47 @@ file and is not implemented here. Nothing in 004 makes it worse, but note that
 the updater's own entry points go through `requireAccess_`, so they inherit it —
 a cache blip during an update run would refuse the owner with "not on the access
 list" rather than a cache error. 006 is worth doing before the next server push.
+
+### Follow-up: the `script.container.ui` scope (owner-reported, fixed after merge)
+
+**Symptom on the deployment:** *"Specified permissions are not sufficient to call
+Ui.showModalDialog. Required permissions:
+https://www.googleapis.com/auth/script.container.ui"*.
+
+**This is a spec gap, not a 004 defect.** SPEC §2.2 lists the manifest scopes as
+"spreadsheets, drive, script.external_request, script.projects (updater),
+userinfo.email" and omits `script.container.ui`. Ticket 002 built the `Keystone`
+menu against that list, ticket 004 added `script.deployments` per ADR 0002 and
+was told "no other scope changes", and neither ticket could have found it from
+the repo: the scope is checked by Apps Script at call time, on a deployment.
+
+**Ticket 002's *Open test URL* and *Open stable URL* have the same dependency and
+would fail the same way.** They were never exercised on the deployment — the
+owner reached both URLs from bookmarks. So this has been broken since 002 and
+surfaced now only because 004 is the first menu item nobody can route around.
+
+**Fix:** `script.container.ui` added to `src/server/appsscript.json`. Nothing
+else changed; the dialogs and the menu code were already correct.
+
+**Why no test caught it, and what now does.** The sandbox stubs
+`SpreadsheetApp.getUi()`, so a missing scope is unreachable from vitest by
+construction — and the browser harness drives the dialog markup directly, past
+the Apps Script permission check. `tests/server-logic.test.js` now asserts the
+manifest declares a scope for each Apps Script service the server actually
+calls, matched by source pattern: `getUi` → `script.container.ui`,
+`UrlFetchApp` → `script.external_request`, `DriveApp` → `drive`, the
+`/deployments/` endpoint → `script.deployments`, and so on. Deleting the scope
+from the manifest fails that test, which I verified rather than assumed. It also
+fails if a scope is declared that nothing uses, because every extra scope is
+another re-authorization prompt for every user.
+
+That test guards the mechanism, not this one line: the next server file to call
+a new Apps Script service now has to declare its scope or CI says so.
+
+**For the Architect.** SPEC §2.2's scope list is wrong as written — any project
+with a bound Sheet menu that opens a dialog needs `script.container.ui`. Worth
+either an ADR alongside 0002 or a direct §2.2 correction. `docs/SPEC.md` is not
+the Builder's to edit, so this note is the whole of my action on it.
+
+**Cost to the owner:** one more re-authorization prompt, on top of the one ADR
+0002 already predicted. Same prompt, same reason — the scope list changed.

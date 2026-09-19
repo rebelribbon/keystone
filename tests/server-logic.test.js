@@ -1452,3 +1452,54 @@ describe("the updater menu and dialogs", () => {
     }
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * The manifest has to declare a scope for everything the server actually calls.
+ *
+ * Apps Script grants only the scopes `appsscript.json` lists, and a missing one
+ * is invisible until the call runs on a deployment: `SpreadsheetApp.getUi()`
+ * builds fine, the menu appears, and then `showModalDialog` throws "Specified
+ * permissions are not sufficient". That is how `script.container.ui` shipped
+ * missing from ticket 002 through ticket 004 — no test could reach it, because
+ * the sandbox stubs `getUi` and never checks a scope.
+ * ------------------------------------------------------------------------ */
+describe("appsscript.json scopes cover what the server calls", () => {
+  const MANIFEST = JSON.parse(readFileSync(join(root, "src/server/appsscript.json"), "utf8"));
+  const SERVER_FILES = ["Code.gs", "Storage.gs", "Api.gs", "Updater.gs"];
+  const sources = Object.fromEntries(
+    SERVER_FILES.map((name) => [name, readFileSync(join(root, "src/server", name), "utf8")])
+  );
+
+  /** [what the code calls, the scope it needs, how to spot the call]. */
+  const REQUIRED = [
+    ["SpreadsheetApp.getUi", "script.container.ui", /SpreadsheetApp\.getUi\s*\(/],
+    ["SpreadsheetApp.getActive", "spreadsheets", /SpreadsheetApp\.getActive\s*\(/],
+    ["UrlFetchApp.fetch", "script.external_request", /UrlFetchApp\.fetch\s*\(/],
+    ["DriveApp", "drive", /DriveApp\./],
+    ["Session.getActiveUser", "userinfo.email", /Session\.getActiveUser\s*\(/],
+    ["the Apps Script API content endpoint", "script.projects", /projects\/.*\/content|KS_SCRIPT_API_BASE/],
+    ["the Apps Script API deployments endpoint", "script.deployments", /\/deployments\//],
+  ];
+
+  const declared = MANIFEST.oauthScopes.map((s) => s.replace("https://www.googleapis.com/auth/", ""));
+
+  for (const [call, scope, pattern] of REQUIRED) {
+    it(`declares ${scope} because the server calls ${call}`, () => {
+      const used = SERVER_FILES.filter((name) => pattern.test(sources[name]));
+      expect(used.length, `no server file matches ${pattern} — update this test`).toBeGreaterThan(0);
+      expect(declared, `${used.join(", ")} calls ${call}`).toContain(scope);
+    });
+  }
+
+  it("declares no scope the server does not use", () => {
+    // Not a hard rule, but an undeclared-for-nothing scope is one more
+    // re-authorization prompt for every user, so it should be deliberate.
+    const known = REQUIRED.map(([, scope]) => scope);
+    for (const scope of declared) expect(known).toContain(scope);
+  });
+
+  it("matches the manifest the build copies into dist/server", () => {
+    expect(MANIFEST.oauthScopes).toEqual([...new Set(MANIFEST.oauthScopes)]);
+    expect(MANIFEST.runtimeVersion).toBe("V8");
+  });
+});
