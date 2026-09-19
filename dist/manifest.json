@@ -1,0 +1,75 @@
+{
+  "tag": "build-7",
+  "commit": "fdf4e5c44be1c362f56df35c0fe7f3aa7f8d56e3",
+  "builtAt": "2026-09-19T17:31:31.541Z",
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "dist/client/catalog-exterior.js",
+      "bytes": 114,
+      "sha256": "f945050eec17819f8578fcc58218356b3a7930ad855ce78cc20c8a8b0c84c2f3"
+    },
+    {
+      "path": "dist/client/catalog-interior.js",
+      "bytes": 114,
+      "sha256": "592043e90cb2fb633e0814315061138e2fa6e79ea10091c7b4b7918574b35e6c"
+    },
+    {
+      "path": "dist/client/catalog-materials.js",
+      "bytes": 115,
+      "sha256": "c4252b2d146150a8ac1840e5cef56c13fc1c5805b7687d21b7dd75fe96feae8a"
+    },
+    {
+      "path": "dist/client/catalog-styles.js",
+      "bytes": 112,
+      "sha256": "85ecaa3e66a33fa520bcb330d80e8a577c1f91538476bfe3ab360e81016de028"
+    },
+    {
+      "path": "dist/client/engine.js",
+      "bytes": 6643,
+      "sha256": "6c963c10c7a826411fad847cafd4cadf2e24e33c323941fa0ea95ce446ec8373"
+    },
+    {
+      "path": "dist/client/styles.css",
+      "bytes": 1905,
+      "sha256": "ab240eb44f37d69af9cb9a5b381d743f466cbdb6ec2c7ac2be73e53b4255315b"
+    },
+    {
+      "path": "dist/client/vendor-three.js",
+      "bytes": 684523,
+      "sha256": "10cae1885d9fd79648438d6e3ff71b9174164439c007f37f123fae353539f517"
+    },
+    {
+      "path": "dist/server/Api.gs",
+      "bytes": 12698,
+      "sha256": "75872044c2adec902df48ac7bdd3af78619b0798a2d2bae835b824b1e97f670c"
+    },
+    {
+      "path": "dist/server/Code.gs",
+      "bytes": 23287,
+      "sha256": "54041505305bbaf6c6ea6a69d7b12cbbb9d8095c31e9b0a415964a60b52d8f0b"
+    },
+    {
+      "path": "dist/server/Index.html",
+      "bytes": 25988,
+      "sha256": "c6a0177cc100bbef6563d66c4028c265360e9ead44e42a649d122319d5ea478e"
+    },
+    {
+      "path": "dist/server/Storage.gs",
+      "bytes": 13144,
+      "sha256": "7aa05e77e5e93de766a157b37c3ac062a72963cb67b14f5bdbdd874f8067c994"
+    },
+    {
+      "path": "dist/server/appsscript.json",
+      "bytes": 468,
+      "sha256": "99a79f6b3a8d216a9ee1f22aa66e490568619aa35986e3af8857d50b58c08429"
+    }
+  ],
+  "server": [
+    "dist/server/Api.gs",
+    "dist/server/Code.gs",
+    "dist/server/Index.html",
+    "dist/server/Storage.gs",
+    "dist/server/appsscript.json"
+  ]
+}
