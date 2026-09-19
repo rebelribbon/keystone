@@ -372,10 +372,11 @@ function getTrashFolder_() {
 /**
  * Write one `<buildId>.ksb` of raw gzip bytes (SPEC §6.4).
  *
- * DriveApp cannot replace a file's binary content, so a re-save trashes the
- * previous file and creates a fresh one under the same name. The folder still
- * holds exactly one live `.ksb` per build, which is the observable contract;
- * true in-place binary update needs the Drive advanced service. See the Handoff.
+ * DriveApp cannot replace a file's binary content (setContent is text-only), so
+ * a re-save trashes the previous file and creates a fresh one under the same
+ * name. One live `.ksb` per build is the contract, decided by the owner on
+ * ticket 003: the Drive advanced service is deliberately NOT pulled in to get a
+ * true in-place binary update. Do not add it here.
  *
  * @param {string} buildId
  * @param {!Array<number>} bytes

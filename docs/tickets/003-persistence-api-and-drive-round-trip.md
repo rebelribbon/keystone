@@ -197,35 +197,70 @@ These still need a deployment:
 4. **The conflict path by hand**, editing `updated` in the Sheet, if you want it
    confirmed against real Sheets timestamps rather than ISO strings.
 
-### `api_getBundle_` — what the defect actually was
+### `api_getBundle_` — the rename, and the gate that has to travel with it
 
-You were right that the name blocks `google.script.run`, and it is renamed.
+You were right that the name blocks `google.script.run`, and it is renamed to
+`api_getBundle`.
 
 One correction to the diagnosis, because it changes what was at risk: as shipped
 in 002, `loader_mode: inline` was **not** dead. `Index.html` never called it from
 the client — `doGet` called `getBundleSource_` server-side during template
 evaluation, where a trailing underscore is irrelevant. So inline mode would have
 worked; what the name blocked was the client-callable path §14.2 describes, and
-any future caller that reached for it from the page.
+any future caller reaching for it from the page.
 
-Renaming it has a consequence worth flagging: it is now reachable by **any**
-signed-in Google account, since the web app is open to anyone with one. As
-written it took `tag` and `file` straight into a fetch URL with no auth check. I
-added the `Users` gate and allowlisted both arguments (`^build-\d+$`, and `file`
-must be one of the six published bundles). Tests cover the denial and the
-traversal attempts. Flagging it rather than burying it because the rename, taken
-alone, would have opened an unauthenticated fetch endpoint.
+#### Why the rename is not safe on its own
+
+**Do not remove the following without replacing it.** Dropping the trailing
+underscore changed this function's blast radius, and the two guards below exist
+only because of that change. They look like defensive boilerplate. They are not.
+
+The web app runs `executeAs: USER_ACCESSING` with `access: ANYONE`, so **anyone
+with a Google account can reach a `google.script.run` endpoint** — the `Users`
+tab is the only thing standing between a stranger and the API. Every other
+`api_*` function goes through `apiCall_`, which checks that first. `api_getBundle`
+lives in `Code.gs` and predates `Api.gs`, so it never had that check: as a
+private function it did not need one, because the only caller was `doGet`, which
+had already authorized the request.
+
+As renamed, and with no guards, it would have been an **unauthenticated endpoint
+that takes a URL fragment from the caller**: `tag` and `file` are concatenated
+into `{base}/dist/client/<file>` and fetched with `UrlFetchApp` from the script's
+own authority. That is a fetch proxy and a path-traversal surface, reachable by
+any Google account, on a public repo's deployment.
+
+So `api_getBundle` now carries two guards:
+
+1. **The `Users` gate**, matching every other `api_*` function: it resolves the
+   caller with `activeEmail_` / `getUserRole_` and returns
+   `{ code: 'ACCESS_DENIED' }` for anyone without a row. It is written inline
+   rather than through `apiCall_` only because `apiCall_` lives in `Api.gs` and
+   this function is in `Code.gs`; if the two ever merge, route it through
+   `apiCall_` rather than deleting the check.
+2. **Argument allowlists, not sanitizing.** `tag` must match `^build-\d+$`.
+   `file` must be one of the six entries in `KS_CLIENT_BUNDLES` — an exact
+   membership test, not an extension check or a `..` filter. Both return
+   `{ code: 'BAD_REQUEST' }`. Allowlisting is the point: a denylist of bad paths
+   is a guessing game, a list of the six files we actually publish is not.
+
+Both are pinned by tests in `tests/server-logic.test.js`: `api_getBundle` is in
+the table asserting every `api_*` function denies an unlisted account and an
+unresolvable one, and a separate case asserts `../../etc` as a tag, a traversal
+path as a file, and `styles.css` (real file, not a client bundle) are all
+rejected. A "simplification" that drops either guard turns those tests red, which
+is the intended tripwire.
 
 ### Deviations worth your eye
 
-- **`writeBuildFile_` replaces rather than overwrites in place.** §2 asks for
-  overwrite-in-place. DriveApp cannot replace a file's *binary* content —
-  `setContent` is text-only — so a re-save trashes the previous `.ksb` and
-  creates a fresh one under the same name. The folder still holds exactly one
-  live `.ksb` per build, which I take to be the observable contract, and the row
-  is updated with the new `driveFileId`. True in-place binary update needs the
-  Drive advanced service, which changes `appsscript.json` and adds a setup step.
-  That is an ADR, not a drive-by, so I did not do it.
+- **`writeBuildFile_` replaces rather than overwrites in place — owner approved.**
+  §2 asks for overwrite-in-place. DriveApp cannot replace a file's *binary*
+  content (`setContent` is text-only), so a re-save trashes the previous `.ksb`
+  and creates a fresh one under the same name, updating `driveFileId` on the row.
+  The owner reviewed this and **ruled that trash-and-recreate is the contract —
+  one live `.ksb` per build — and that the Drive advanced service is not to be
+  pulled in for it.** Treat that as settled: do not add
+  `advancedServices` to `appsscript.json` for this, and do not "fix" the
+  trash-and-recreate into something that needs it.
 - **`isConflict_` treats a missing `baseUpdated` as a conflict** when a server
   row exists. §3 does not say which way to fall; refusing to clobber is the only
   choice whose failure mode is a spare copy rather than lost work. New builds are
