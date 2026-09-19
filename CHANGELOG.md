@@ -282,3 +282,33 @@ Safety properties worth keeping:
   header and nowhere else; a test asserts it appears in no result, log row, or
   backup. This is the opposite case to the client-side Drive token ticket 005
   rejected, and the distinction is exactly where the token lives.
+
+## 004 follow-up — the `script.container.ui` scope
+
+Owner hit *"Specified permissions are not sufficient to call
+Ui.showModalDialog"* on the first live run of the updater.
+
+- `src/server/appsscript.json`: added
+  `https://www.googleapis.com/auth/script.container.ui`. Nothing else changed —
+  the menu and dialog code were already correct.
+- **A spec gap, not a 004 defect.** SPEC §2.2's scope list omits it. Ticket 002
+  built the `Keystone` menu against that list and ticket 004 was told to add
+  `script.deployments` and nothing else. Neither could have found it from the
+  repo: Apps Script checks the scope at call time, on a deployment.
+- **Ticket 002's *Open test URL* and *Open stable URL* have the same dependency**
+  and have been broken since 002. They were never exercised — the owner reached
+  both URLs from bookmarks. The updater is simply the first menu item with no way
+  around it. Flagged for the Architect as an ADR or a §2.2 correction.
+- `tests/server-logic.test.js`: a new block asserts the manifest declares a scope
+  for every Apps Script service the server actually calls, matched by source
+  pattern (`getUi` → `script.container.ui`, `UrlFetchApp` →
+  `script.external_request`, `DriveApp` → `drive`, `/deployments/` →
+  `script.deployments`, …), and that no scope is declared which nothing uses.
+  Removing the scope fails the test; that was verified, not assumed.
+  The sandbox stubs `getUi`, so this class of defect was unreachable from vitest
+  until the manifest itself became the thing under test.
+- `docs/SETUP.md`: seven scopes, a troubleshooting entry naming the exact error
+  and the fix, and the re-authorization note now covers both new scopes.
+
+Costs the owner one more re-authorization prompt, for the same reason as ADR
+0002's: the scope list changed.
