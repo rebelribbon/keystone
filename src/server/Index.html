@@ -163,6 +163,7 @@
             requestAnimationFrame(function () {
               firstFrameAt = performance.now();
               if (boot.devGates && window.KSGates) window.KSGates.run(boot, bootAt, firstFrameAt);
+              if (boot.devGate3 && window.KSGate3) window.KSGate3.run(boot);
             });
             loadingEl.hidden = true;
             console.log('[KS] loaded', { tag: boot.tag, channel: boot.channel, base: boot.base });
@@ -389,6 +390,169 @@
           var pending = rows.filter(function (r) { return r.result === 'running'; });
           if (!pending.length) console.log('[KS] gates', rows);
         }
+      })();
+    </script>
+    <? } ?>
+
+    <? if (devGate3) { ?>
+    <script>
+      // Owner-only Phase 0 gate 3 harness (SPEC §2.1 gate 3, §6.4).
+      // Round-trips a deterministic 5 MB buffer through the persistence API and
+      // compares SHA-256 before gzip and after gunzip.
+      window.KSGate3 = (function () {
+        var BYTES = 5 * 1024 * 1024;
+        var SEED = 0x5eed1e;
+
+        // xorshift32: same bytes every run, no dependence on Math.random.
+        function makeBuffer(length, seed) {
+          var out = new Uint8Array(length);
+          var x = seed >>> 0 || 1;
+          for (var i = 0; i < length; i++) {
+            x ^= x << 13; x >>>= 0;
+            x ^= x >>> 17;
+            x ^= x << 5;  x >>>= 0;
+            out[i] = x & 0xff;
+          }
+          return out;
+        }
+
+        function hex(buffer) {
+          var view = new Uint8Array(buffer);
+          var out = '';
+          for (var i = 0; i < view.length; i++) out += ('0' + view[i].toString(16)).slice(-2);
+          return out;
+        }
+
+        function sha256(bytes) {
+          return crypto.subtle.digest('SHA-256', bytes).then(hex);
+        }
+
+        function paint(boot) {
+          var panel = document.createElement('div');
+          panel.className = 'ks-gates';
+          var card = document.createElement('div');
+          card.className = 'ks-gates__card';
+          panel.appendChild(card);
+
+          var heading = document.createElement('h1');
+          heading.textContent = 'Phase 0 gate 3 — Drive round-trip';
+          heading.style.margin = '0 0 6px';
+          heading.style.fontSize = '20px';
+          card.appendChild(heading);
+
+          var meta = document.createElement('p');
+          meta.className = 'ks-gates__meta';
+          meta.textContent = 'tag ' + boot.tag + '  ·  channel ' + boot.channel +
+            '  ·  ' + new Date().toISOString();
+          card.appendChild(meta);
+
+          var status = document.createElement('p');
+          status.style.fontSize = '14px';
+          card.appendChild(status);
+
+          var table = document.createElement('table');
+          table.innerHTML = '<thead><tr><th>Measure</th><th>Value</th></tr></thead>';
+          var tbody = document.createElement('tbody');
+          table.appendChild(tbody);
+          card.appendChild(table);
+
+          document.body.appendChild(panel);
+          return { status: status, tbody: tbody };
+        }
+
+        function setRows(tbody, rows) {
+          tbody.innerHTML = '';
+          rows.forEach(function (r) {
+            var tr = document.createElement('tr');
+            var label = document.createElement('td');
+            label.textContent = r[0];
+            var value = document.createElement('td');
+            value.textContent = r[1];
+            value.className = 'num';
+            if (r[2]) value.classList.add(r[2]);
+            tr.appendChild(label);
+            tr.appendChild(value);
+            tbody.appendChild(tr);
+          });
+        }
+
+        return {
+          run: function (boot) {
+            var view = paint(boot);
+            var rows = [];
+            var buffer, sourceDigest, saved, loaded, loadedDigest;
+
+            function show(note) {
+              view.status.textContent = note;
+              setRows(view.tbody, rows);
+            }
+
+            show('Generating ' + BYTES.toLocaleString() + ' bytes...');
+            buffer = makeBuffer(BYTES, SEED);
+            rows.push(['Buffer size', BYTES.toLocaleString() + ' bytes']);
+
+            return sha256(buffer)
+              .then(function (digest) {
+                sourceDigest = digest;
+                rows.push(['SHA-256 before gzip', digest]);
+                show('Saving to Drive...');
+                return KS.persistence.saveBuild(buffer, { name: 'gate3-roundtrip', schema: 1 }, {
+                  onProgress: function (p) {
+                    if (p.phase === 'upload') {
+                      view.status.textContent = 'Uploading chunk ' + p.index + ' of ' + p.total +
+                        ' at ' + p.chunkSize.toLocaleString() + ' chars...';
+                    } else if (p.phase === 'resize') {
+                      view.status.textContent = 'Server rejected that chunk size; retrying at ' +
+                        p.chunkSize.toLocaleString() + ' chars...';
+                    }
+                  }
+                });
+              })
+              .then(function (result) {
+                saved = result;
+                rows.push(['gzip size', result.gzipBytes.toLocaleString() + ' bytes']);
+                rows.push(['base64 size', result.base64Chars.toLocaleString() + ' chars']);
+                rows.push(['Final chunk size', result.chunkSize.toLocaleString() + ' chars']);
+                rows.push(['Chunk count', String(result.chunkCount)]);
+                rows.push(['Upload attempts', String(result.uploadAttempts)]);
+                rows.push(['Save wall clock', result.seconds.toFixed(1) + ' s']);
+                rows.push(['buildId', result.buildId]);
+                show('Loading back from Drive...');
+                return KS.persistence.loadBuild(result.buildId, {
+                  onProgress: function (p) {
+                    view.status.textContent = 'Downloading chunk ' + p.index + ' of ' + p.total + '...';
+                  }
+                });
+              })
+              .then(function (result) {
+                loaded = result;
+                rows.push(['Load wall clock', result.seconds.toFixed(1) + ' s']);
+                rows.push(['Bytes read back', result.bytes.length.toLocaleString() + ' bytes']);
+                return sha256(result.bytes);
+              })
+              .then(function (digest) {
+                loadedDigest = digest;
+                rows.push(['SHA-256 after gunzip', digest]);
+                var pass = digest === sourceDigest && loaded.bytes.length === BYTES;
+                rows.push(['Gate 3', pass ? 'PASS' : 'FAIL', pass ? 'ks-pass' : 'ks-fail']);
+                show(pass
+                  ? 'Byte-identical round trip. Cleaning up the test build...'
+                  : 'Digests differ. Cleaning up the test build...');
+                return KS.persistence.callServer('api_deleteBuild', [saved.buildId]);
+              })
+              .then(function () {
+                rows.push(['Test build', 'soft-deleted']);
+                show('Done. Transcribe these into docs/PHASE0_RESULTS.md.');
+                console.log('[KS] gate3', { source: sourceDigest, loaded: loadedDigest, saved: saved });
+              })
+              .catch(function (err) {
+                rows.push(['Gate 3', 'FAIL', 'ks-fail']);
+                rows.push(['Error', (err && err.code ? err.code + ': ' : '') + (err && err.message ? err.message : String(err))]);
+                show('Gate 3 failed.');
+                console.error('[KS] gate3 failed', err);
+              });
+          }
+        };
       })();
     </script>
     <? } ?>

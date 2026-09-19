@@ -139,6 +139,11 @@ access settings (SPEC §2.2). Nothing else needs those scopes, so do not add any
 
 ## 7. Deploy the test web app
 
+Both channels are **versioned `/exec` deployments** (ADR 0001). The `/dev` URL is
+not part of the deployment model: when you are signed into more than one Google
+account, Google rewrites the path to `/macros/u/N/s/...` and the request never
+reaches the script. Do not use it.
+
 1. **Deploy → New deployment**.
 2. Click the gear next to *Select type* and choose **Web app**.
 3. Fill in:
@@ -149,11 +154,11 @@ access settings (SPEC §2.2). Nothing else needs those scopes, so do not add any
 5. Authorize when prompted. You will see *Google hasn't verified this app* —
    this is your own script. Click **Advanced → Go to Keystone (unsafe)** and
    **Allow**. Review the scopes; they should be the five from step 6.
-6. Copy the **Web app URL**. It ends in `/exec`.
-7. **The test URL is that same URL with `/exec` replaced by `/dev`.** Save both.
-
-The `/dev` URL always runs your latest saved code, which is why it is the test
-channel. Only you (the script owner) can open `/dev`.
+6. Copy the **Web app URL**. It ends in `/exec`. This is your **test URL**.
+7. **Bookmark it with `?c=test` on the end**, like
+   `https://script.google.com/macros/s/AKfy.../exec?c=test`. That parameter is
+   what makes the page load the newest `build-*` tag instead of `stable_tag`.
+   Without it the deployment behaves as another stable one.
 
 ---
 
@@ -161,9 +166,20 @@ channel. Only you (the script owner) can open `/dev`.
 
 1. **Deploy → New deployment** again, same **Web app** type.
 2. Description: `Keystone stable v1`. Same execute-as and access settings.
-3. **Deploy**, and copy this URL too. This is the stable `/exec` URL.
+3. **Deploy**, and copy this URL too. This is your **stable URL**; bookmark it
+   as-is, with no `?c=` parameter.
+
+You now have two `/exec` URLs that look almost identical and differ only in the
+deployment id. Label the bookmarks clearly. You record both in Settings in the
+next step, which is also what lets the `Keystone` menu show them back to you.
 
 Rolling back later is a Settings change (`stable_tag`), not a redeploy.
+
+One consequence of this model: **server code changes need a new version on both
+deployments**, not just stable. Client changes do not — the test deployment
+still resolves the newest `build-*` tag at request time, so merging a PR puts
+new client code on the test URL within a couple of minutes with nobody touching
+Apps Script.
 
 ---
 
@@ -178,6 +194,8 @@ the value in column B, starting at row 2 (row 1 is the `key | value` header).
 | `github_repo` | `rebelribbon/keystone` |
 | `asset_base_url` | `https://cdn.jsdelivr.net/gh/rebelribbon/keystone@{tag}` |
 | `stable_tag` | the newest `build-*` tag — the one you verified in step 4 |
+| `test_url` | the test deployment's `/exec` URL from step 7, without `?c=test` |
+| `stable_url` | the stable deployment's `/exec` URL from step 8 |
 | `default_units` | `imperial` |
 | `region_multiplier` | `1.0` |
 
@@ -242,15 +260,28 @@ If the menu is missing, the `onOpen` trigger has not run — reload once more.
 
 ## 12. Check it works
 
-1. **Keystone → Open test URL**, and click the link.
+1. **Keystone → Open test URL**, and click the link. The dialog already appends
+   `?c=test` for you.
 2. You should see the Keystone loading screen list the six bundles, then a lit,
    shadowed, spinning cube.
 3. Open the browser console (F12). You should see
-   `[KS] boot {tag: "build-4", channel: "test", user: "you@example.com"}`,
-   with whatever the newest tag is in place of `build-4`.
+   `[KS] boot {tag: "build-5", channel: "test", user: "you@example.com"}`, with
+   whatever the newest tag is in place of `build-5`.
+4. Now open the **stable** URL the same way. Same cube, but the console should
+   report `channel: "stable"` and the tag should be whatever `stable_tag` says.
 
-To run the Phase 0 gates, add `?dev=gates` to the test URL. The panel reports
-gates 1, 2, and 4; transcribe the results into `docs/PHASE0_RESULTS.md`.
+Seeing the two channels resolve different tags is the check that ADR 0001's
+model is working. If both report `stable`, the `?c=test` parameter is missing
+from the test bookmark.
+
+To run the Phase 0 gates, append `?dev=gates` (gates 1, 2 and 4) or `?dev=gate3`
+(the Drive round-trip) to either URL. Both routes are owner-only. Transcribe the
+results into `docs/PHASE0_RESULTS.md`.
+
+`?dev=gate3` writes a real 5 MB build to Drive and then soft-deletes it, so
+after a run expect one extra row in `Builds` with `deleted` set, a `.ksb` file
+in the `Trash` subfolder, and `save` and `delete` rows in `Log`. That is the
+harness cleaning up after itself, not a bug.
 
 ---
 
@@ -272,8 +303,8 @@ the default:
 
 - Open the URL in a Chrome profile whose only, or default, account is that one, or
 - Open an Incognito window and sign into just that account, or
-- Sign out of the other Google accounts and reopen the plain `/exec` (or `/dev`)
-  URL with no `/u/N/` segment in it.
+- Sign out of the other Google accounts and reopen the plain `/exec` URL with no
+  `/u/N/` segment in it.
 
 Deleting the `/u/N/` part by hand usually does not stick — Google puts it back.
 Changing which account is the default is what actually holds.

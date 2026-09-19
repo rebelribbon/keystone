@@ -121,3 +121,131 @@ Do not redesign this in this ticket. Implement the ladder as specified, and **re
 - [ ] No secrets, Sheet IDs, or Drive folder IDs in the repo. No `TODO` in `src/`. No `localStorage`.
 
 ## Handoff (Builder fills in)
+
+### What changed
+
+The server persistence API, the client transport that feeds it, the `?dev=gate3`
+harness, and ADR 0001's channel correction. Gate 3 itself still needs your run on
+a deployment — see **What you have to verify** below.
+
+### Files
+
+Added: `docs/decisions/0001-...md` (verbatim), `src/server/Api.gs`,
+`src/client/persistence/{codec,chunker,transport,save,load}.js`,
+`tests/codec.test.js`, `tests/chunker.test.js`,
+`screenshots/003-gate3-harness.png`.
+
+Changed: `src/server/Storage.gs` (Drive + `Builds`), `src/server/Code.gs`
+(ADR 0001, `api_whoami` moved out, `api_getBundle` renamed and hardened),
+`src/server/Index.html` (gate 3 harness), `src/client/main.js`
+(`KS.persistence`), `tests/server-logic.test.js`, `docs/SETUP.md`,
+`docs/PHASE0_RESULTS.md`, `docs/DEFERRED.md`, `CHANGELOG.md`.
+
+`npm test` is 122 tests across 7 files, `npm run build` passes, `dist/server/`
+now carries `Api.gs`, and `dist/client/` is still exactly the seven locked files.
+
+### Verified in-session, and how
+
+I cannot deploy Apps Script, so I ran the **real** `Storage.gs`, `Code.gs`, and
+`Api.gs` in a Node sandbox with in-memory stand-ins for `SpreadsheetApp`,
+`CacheService`, `DriveApp`, `LockService`, `Utilities`, and `Session`, exposed
+them over HTTP, shimmed `google.script.run` to reach them, and drove the real
+`Index.html` and the real client transport in headless Chromium. This exercises
+the shipped server logic, not a reimplementation of it.
+
+**Gate 3 flow passed** (`screenshots/003-gate3-harness.png`):
+
+| Measure | Value |
+|---|---|
+| Buffer | 5,242,880 bytes |
+| SHA-256 before gzip | `065ce6350937b564c88562c4fb60be579942f8732cb5a2d2e0e30a3184d374d7` |
+| SHA-256 after gunzip | `065ce6350937b564c88562c4fb60be579942f8732cb5a2d2e0e30a3184d374d7` |
+| gzip / base64 | 5,244,503 bytes / 6,992,672 chars |
+| Final chunk size | 100,000 chars |
+| Chunk count | 70 |
+| Upload attempts | 5 |
+
+The ladder behaved exactly as §7 predicted: four rejections (1.5 MB, 750 KB,
+375 KB, 187.5 KB) then success at the 100 KB floor, 70 chunks.
+
+Side effects checked against the acceptance list: the `Builds` row ends with
+`deleted` = `true`, the `.ksb` sits in the `Trash` subfolder with the Builds
+folder empty, and `Log` has exactly the `save` and `delete` rows — no read
+logging.
+
+**Conflict rule checked** against the same live API: a save carrying a stale
+`baseUpdated` produced `<name> (conflict copy)` under a new id, left the
+original's `updated` and `driveFileId` untouched, and a save carrying the
+current `baseUpdated` committed cleanly with no conflict.
+
+### What you have to verify
+
+Everything above is local and in-process. It proves the logic, not the platform.
+These still need a deployment:
+
+1. **`?dev=gate3` on a real URL.** The numbers that matter are the timings, and
+   my 0.8 s save measures local function calls, not `google.script.run` round
+   trips. 70 sequential round trips is the §7 risk. Transcribe the panel into
+   `docs/PHASE0_RESULTS.md`, and if the save exceeds 90 seconds say so — per §7
+   that is the Architect's signal to move chunk staging off `CacheService`.
+2. **Two versioned deployments.** `docs/SETUP.md` steps 7–8 are rewritten for
+   ADR 0001. You need a second `/exec` deployment, both URLs in Settings as
+   `test_url` and `stable_url`, and `?c=test` on the test bookmark. The check
+   that the model works: the two URLs report different tags in the console while
+   you are signed into several Google accounts.
+3. **A second, unlisted Google account** hitting the page and an `api_*` call.
+4. **The conflict path by hand**, editing `updated` in the Sheet, if you want it
+   confirmed against real Sheets timestamps rather than ISO strings.
+
+### `api_getBundle_` — what the defect actually was
+
+You were right that the name blocks `google.script.run`, and it is renamed.
+
+One correction to the diagnosis, because it changes what was at risk: as shipped
+in 002, `loader_mode: inline` was **not** dead. `Index.html` never called it from
+the client — `doGet` called `getBundleSource_` server-side during template
+evaluation, where a trailing underscore is irrelevant. So inline mode would have
+worked; what the name blocked was the client-callable path §14.2 describes, and
+any future caller that reached for it from the page.
+
+Renaming it has a consequence worth flagging: it is now reachable by **any**
+signed-in Google account, since the web app is open to anyone with one. As
+written it took `tag` and `file` straight into a fetch URL with no auth check. I
+added the `Users` gate and allowlisted both arguments (`^build-\d+$`, and `file`
+must be one of the six published bundles). Tests cover the denial and the
+traversal attempts. Flagging it rather than burying it because the rename, taken
+alone, would have opened an unauthenticated fetch endpoint.
+
+### Deviations worth your eye
+
+- **`writeBuildFile_` replaces rather than overwrites in place.** §2 asks for
+  overwrite-in-place. DriveApp cannot replace a file's *binary* content —
+  `setContent` is text-only — so a re-save trashes the previous `.ksb` and
+  creates a fresh one under the same name. The folder still holds exactly one
+  live `.ksb` per build, which I take to be the observable contract, and the row
+  is updated with the new `driveFileId`. True in-place binary update needs the
+  Drive advanced service, which changes `appsscript.json` and adds a setup step.
+  That is an ADR, not a drive-by, so I did not do it.
+- **`isConflict_` treats a missing `baseUpdated` as a conflict** when a server
+  row exists. §3 does not say which way to fall; refusing to clobber is the only
+  choice whose failure mode is a spare copy rather than lost work. New builds are
+  unaffected — there is no row to conflict with.
+- **The menu reads `test_url` / `stable_url` from Settings.** Two versioned
+  deployments of one project cannot discover each other's URLs from inside the
+  script — that is the same limitation ADR 0001 cites for detection — so the
+  URLs have to be recorded. The serving deployment's own URL is the fallback
+  while they are blank.
+- **`api_loadBuildInfo` and `api_loadChunk` re-read and re-encode the Drive file
+  on every call.** For a 5 MB build that is 70 reads of the same file during one
+  load. It is correct and it is simple, and caching it would need its own
+  invalidation story; if load timings come back bad on the real deployment, this
+  is the first thing to change.
+
+### Known gaps
+
+- `src/server/` is still only compile-checked and sandbox-tested. Nothing has
+  executed against real `DriveApp`, `LockService`, or `CacheService`, and the
+  100 KB cache cap I coded to is from Google's documented limit, not measured.
+- `loader_mode: inline` remains unexecuted end to end, now for the second ticket
+  running.
+- Gate 6 and the updater are ticket 004.
