@@ -66,7 +66,11 @@ one project (SPEC §2.2). Do not create a standalone script project.
 
 ---
 
-## 4. Get the server files
+## 4. Get the server files (one time only)
+
+**This is a bootstrap.** From ticket 004 onward, *Keystone → Update server code*
+writes these files for you from a release tag. It cannot install itself, so you
+paste them by hand exactly once, and never again unless you are recovering.
 
 **Use the newest `build-*` tag.** Tag numbers do not line up with ticket
 numbers: the release workflow fires on every push to `main`, including
@@ -75,37 +79,36 @@ documentation-only commits, so the counter runs ahead. `build-1`, `build-2`, and
 because the server code did not exist until later.
 
 1. Open <https://github.com/rebelribbon/keystone/releases>. The release at the
-   top is the newest; note its tag, for example `build-4`.
+   top is the newest; note its tag, for example `build-10`.
 2. Confirm that tag actually carries the server files by opening this URL with
    your tag substituted:
 
    ```
-   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/appsscript.json
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/appsscript.json
    ```
 
    You should see JSON starting with `{ "timeZone": ...`. If you get a 404 or a
    "Couldn't find the requested file" page, that tag predates the server code —
    go back a release, or wait for the next one.
 
-3. Open each of these four and copy the whole contents. Replace `build-4` with
+3. Open each of these five and copy the whole contents. Replace `build-10` with
    your tag in every URL.
 
    ```
-   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Code.gs
-   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Storage.gs
-   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/Index.html
-   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-4/dist/server/appsscript.json
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/Code.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/Storage.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/Api.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/Updater.gs
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/Index.html
+   https://cdn.jsdelivr.net/gh/rebelribbon/keystone@build-10/dist/server/appsscript.json
    ```
 
    If jsDelivr renders a file instead of showing plain text, use
-   `https://raw.githubusercontent.com/rebelribbon/keystone/build-4/dist/server/<file>`
+   `https://raw.githubusercontent.com/rebelribbon/keystone/build-10/dist/server/<file>`
    instead — same content, always served raw.
 
 A brand-new tag can take up to a minute to appear on jsDelivr. The release's own
 notes list every file it contains, under `server`, so you can check there too.
-
-From ticket 004 onward the *Keystone → Update server code* menu item does this
-for you. Until then it is copy and paste.
 
 ---
 
@@ -117,11 +120,13 @@ In the Apps Script editor:
    of it and paste in the real `Code.gs`. Save (the disk icon, or Ctrl/Cmd+S).
 2. Click **+ → Script** next to *Files*. Name it `Storage` (the editor adds
    `.gs`). Paste in `Storage.gs`. Save.
-3. Click **+ → HTML**. Name it `Index` (the editor adds `.html`). Delete the
+3. Same again for `Api` and `Updater`.
+4. Click **+ → HTML**. Name it `Index` (the editor adds `.html`). Delete the
    starter markup and paste in `Index.html`. Save.
 
-The file names must be exactly `Code`, `Storage`, and `Index` — `doGet` loads the
-template by the name `Index`.
+Five files: `Code`, `Storage`, `Api`, `Updater`, `Index`. The names must be
+exactly these — `doGet` loads the template by the name `Index`, and the updater
+matches files by name when it writes.
 
 ---
 
@@ -132,8 +137,23 @@ template by the name `Index`.
 3. Go back to the editor. Open `appsscript.json`, select all, and paste in the
    `appsscript.json` you copied. Save.
 
-It sets the V8 runtime, the timezone, the five OAuth scopes, and the web app
-access settings (SPEC §2.2). Nothing else needs those scopes, so do not add any.
+It sets the V8 runtime, the timezone, the six OAuth scopes, and the web app
+access settings (SPEC §2.2, ADR 0002). Nothing else needs those scopes, so do
+not add any.
+
+---
+
+## 6b. Turn on the Apps Script API
+
+The updater writes to this project through the Apps Script API, and that API is
+off by default for every Google account.
+
+1. Go to <https://script.google.com/home/usersettings>.
+2. Switch **Google Apps Script API** to **On**.
+
+This is a per-account setting, not a per-project one, so you do it once. Skipping
+it does not break anything now; it makes *Update server code* fail later with a
+403 and a message pointing back at this page.
 
 ---
 
@@ -153,9 +173,12 @@ reaches the script. Do not use it.
 4. Click **Deploy**.
 5. Authorize when prompted. You will see *Google hasn't verified this app* —
    this is your own script. Click **Advanced → Go to Keystone (unsafe)** and
-   **Allow**. Review the scopes; they should be the five from step 6.
+   **Allow**. Review the scopes; they should be the six from step 6.
 6. Copy the **Web app URL**. It ends in `/exec`. This is your **test URL**.
-7. **Bookmark it with `?c=test` on the end**, like
+7. **Copy the deployment ID too.** *Deploy → Manage deployments*, select this
+   deployment, and copy the long **Deployment ID** string (it starts `AKfy...`
+   and is not the URL). The updater needs it in step 9.
+8. **Bookmark the URL with `?c=test` on the end**, like
    `https://script.google.com/macros/s/AKfy.../exec?c=test`. That parameter is
    what makes the page load the newest `build-*` tag instead of `stable_tag`.
    Without it the deployment behaves as another stable one.
@@ -168,6 +191,7 @@ reaches the script. Do not use it.
 2. Description: `Keystone stable v1`. Same execute-as and access settings.
 3. **Deploy**, and copy this URL too. This is your **stable URL**; bookmark it
    as-is, with no `?c=` parameter.
+4. Copy this deployment's **Deployment ID** as well, the same way as in step 7.
 
 You now have two `/exec` URLs that look almost identical and differ only in the
 deployment id. Label the bookmarks clearly. You record both in Settings in the
@@ -175,11 +199,11 @@ next step, which is also what lets the `Keystone` menu show them back to you.
 
 Rolling back later is a Settings change (`stable_tag`), not a redeploy.
 
-One consequence of this model: **server code changes need a new version on both
-deployments**, not just stable. Client changes do not — the test deployment
-still resolves the newest `build-*` tag at request time, so merging a PR puts
-new client code on the test URL within a couple of minutes with nobody touching
-Apps Script.
+Server code changes need a new version on both deployments. **You never create
+one by hand** — that is what the updater is for, and it is why the two deployment
+IDs go into `Settings` in the next step (ADR 0002). Client changes need nothing
+at all: the test deployment resolves the newest `build-*` tag at request time, so
+merging a PR puts new client code on the test URL within a couple of minutes.
 
 ---
 
@@ -196,6 +220,8 @@ the value in column B, starting at row 2 (row 1 is the `key | value` header).
 | `stable_tag` | the newest `build-*` tag — the one you verified in step 4 |
 | `test_url` | the test deployment's `/exec` URL from step 7, without `?c=test` |
 | `stable_url` | the stable deployment's `/exec` URL from step 8 |
+| `testDeploymentId` | the test **deployment ID** from step 7 |
+| `stableDeploymentId` | the stable **deployment ID** from step 8 |
 | `default_units` | `imperial` |
 | `region_multiplier` | `1.0` |
 
@@ -223,7 +249,15 @@ After this, `stable_tag` is the rollback lever (§3.2): test a new build on the
 test URL, then move this one cell to promote it. Changing it is the only step
 needed — no redeploy.
 
-Optional seventh key, only if the test URL will not load bundles from jsDelivr
+Two more keys, `server_tag` and `server_fingerprint`, appear on their own the
+first time you run *Update server code*. They record which release the Apps
+Script project is running, and `?dev=gates` shows them back to you. Do not fill
+them in by hand.
+
+The two `DeploymentId` keys are spelled in camelCase because ticket 004 named
+them that way; every other key is snake_case. Copy them exactly as written above.
+
+Optional extra key, only if the test URL will not load bundles from jsDelivr
 (see *If the cube does not appear* below):
 
 | key | value |
@@ -251,8 +285,12 @@ or `viewer`.
 ## 11. Reload the Sheet to get the menu
 
 Close and reopen the **Keystone Index** sheet. A **Keystone** menu appears next
-to *Help*, with *Open test URL* and *Open stable URL*. Each opens a small dialog
-with a clickable link, because Apps Script cannot retarget the parent tab.
+to *Help*, with four items:
+
+- *Open test URL* and *Open stable URL* — each opens a small dialog with a
+  clickable link, because Apps Script cannot retarget the parent tab.
+- *Update server code…* and *Promote server code to stable…* — the updater
+  (step 13). Both are owner-only; anyone else gets a one-line "owner only" toast.
 
 If the menu is missing, the `onOpen` trigger has not run — reload once more.
 
@@ -278,10 +316,68 @@ To run the Phase 0 gates, append `?dev=gates` (gates 1, 2 and 4) or `?dev=gate3`
 (the Drive round-trip) to either URL. Both routes are owner-only. Transcribe the
 results into `docs/PHASE0_RESULTS.md`.
 
+`?dev=gates` also prints which server code the project is running, once the
+updater has run at least once. Before that it says so plainly rather than
+guessing.
+
 `?dev=gate3` writes a real 5 MB build to Drive and then soft-deletes it, so
 after a run expect one extra row in `Builds` with `deleted` set, a `.ksb` file
 in the `Trash` subfolder, and `save` and `delete` rows in `Log`. That is the
 harness cleaning up after itself, not a bug.
+
+---
+
+## 13. From now on: updating the server code
+
+You have pasted the server files once. You never do it again.
+
+**When a release changes anything under `src/server/`:**
+
+1. **Keystone → Update server code…**
+2. Pick a tag. The newest is preselected; the one the project is running now
+   carries a *running now* badge.
+3. **Write to this project.** The updater fetches `dist/server/*` at that tag,
+   checks every file's SHA-256 against the release manifest, writes them into
+   the Apps Script project, creates a version, and points the **test** deployment
+   at it. Takes a few seconds.
+4. Test the **test** URL.
+5. **Keystone → Promote server code to stable…** when you are happy. It shows
+   which version each deployment serves and asks you to confirm by version
+   number. It creates nothing; it only moves the version already on test.
+
+Stable keeps serving its old version until step 5. That is the whole point of
+having a stable channel, so there is deliberately no way to promote
+automatically (ADR 0002).
+
+**The first run after ticket 004 will ask you to authorize again.** ADR 0002
+adds the `script.deployments` scope, and Google re-prompts whenever the scope
+list changes. Everyone else sees the same prompt the next time they open the web
+app. It is expected, it is not a failure, and the consent screen will again say
+*Google hasn't verified this app* — it is your own script.
+
+### Restoring after a bad server push
+
+Every run writes a backup of the project's previous contents to the **Keystone
+Builds** folder in Drive, named `server-backup-<timestamp>.json`. The ten most
+recent are kept.
+
+If an update breaks the test deployment:
+
+1. **Stable is unaffected** until you promote, so there is no emergency.
+2. Simplest fix: run *Update server code* again and pick the previous tag. This
+   is the normal path and needs nothing from the backup.
+3. If the project itself will not run at all — for example the updater got
+   partly written and the menu is gone — recover by hand:
+   - Open the newest `server-backup-*.json` in Drive (right-click → *Open with →
+     Google Docs* renders it as text you can copy).
+   - It is a JSON object with a `files` array; each entry has `name`, `type`, and
+     `source`.
+   - In the Apps Script editor, paste each entry's `source` back into the file
+     with the matching `name`, exactly as in steps 5 and 6.
+   - Save, then reload the Sheet.
+
+There is no restore button by design: a one-click restore that ran through the
+same broken code path is not a recovery path.
 
 ---
 
@@ -335,4 +431,30 @@ only use it if `cdn` does not work.
 
 **Nothing changed after a new release.**
 The test URL looks up the newest `build-*` tag and caches it for 60 seconds.
-Wait a minute and reload.
+Wait a minute and reload. If the change was to server code, a release alone does
+nothing — run *Update server code* (step 13).
+
+**"The Apps Script API answered 403."**
+The Apps Script API is off for your Google account. Turn it on at
+<https://script.google.com/home/usersettings> and run the update again. Nothing
+was written, so there is nothing to undo.
+
+**"The Apps Script API answered 401."**
+The `script.deployments` scope has not been granted yet. Reload the Sheet, let
+the authorization prompt run, and retry.
+
+**"Digest mismatch on …".**
+A file fetched from the CDN does not match the SHA-256 the release manifest
+recorded for it. The updater aborts before writing anything. Usually it means
+jsDelivr is still serving a partly-populated cache for a brand-new tag — wait a
+minute and retry. If it persists on a tag that is hours old, do not force it;
+that is the check doing its job.
+
+**"The test deployment was NOT repointed."**
+`testDeploymentId` is empty in `Settings`. The files and the version were still
+written, so fill the key in from *Deploy → Manage deployments* and run the update
+again — it is safe to repeat.
+
+**The Keystone menu shows "owner only".**
+Updater items are owner-only. Your row in `Users` has role `editor` or `viewer`,
+not `owner`.

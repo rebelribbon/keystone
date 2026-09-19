@@ -529,24 +529,7 @@ function api_setSetting(key, value) {
       throw ksError_('FORBIDDEN', 'Only the owner can change settings.');
     }
     var name = String(key == null ? '' : key).trim();
-    if (!name) throw ksError_('BAD_REQUEST', 'A settings key is required.');
-
-    var sheet = SpreadsheetApp.getActive().getSheetByName('Settings');
-    if (!sheet) throw ksError_('SETTINGS_TAB_MISSING', 'The Settings tab is missing.');
-    var values = sheet.getDataRange().getValues() || [];
-    var rowNumber = 0;
-    for (var i = 0; i < values.length; i++) {
-      if (String(values[i][0] == null ? '' : values[i][0]).trim() === name) {
-        rowNumber = i + 1;
-        break;
-      }
-    }
-    if (rowNumber) {
-      sheet.getRange(rowNumber, 2).setValue(value);
-    } else {
-      sheet.appendRow([name, value]);
-    }
-    invalidateSettings_();
+    writeSetting_(name, value);
     logRow_(access.email, 'setting', '', name);
     return { ok: true };
   });

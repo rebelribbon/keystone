@@ -33,13 +33,18 @@ var KS_CLIENT_BUNDLES = [
  * ---------------------------------------------------------------------- */
 
 /**
- * Pure. Newest two `build-N` tags, newest first, from a GitHub Releases
- * payload (array or JSON text). Tag names that are not `build-<digits>` are
- * ignored. Sorted by the numeric suffix, not lexically, so build-12 > build-9.
+ * Pure. Newest `build-N` tags, newest first, from a GitHub Releases payload
+ * (array or JSON text). Tag names that are not `build-<digits>` are ignored.
+ * Sorted by the numeric suffix, not lexically, so build-12 > build-9.
+ *
+ * `limit` defaults to 2, which is what the loader needs (the tag it serves plus
+ * the one behind it for "Try the previous build"). Ticket 004's tag picker asks
+ * for ten through the same function rather than keeping a second copy of this.
  * @param {(string|Array<Object>)} releaseJson
- * @return {!Array<string>} zero, one, or two tag names
+ * @param {number=} limit how many tags to return, default 2
+ * @return {!Array<string>} zero or more tag names, at most `limit`
  */
-function pickNewestBuildTags_(releaseJson) {
+function pickNewestBuildTags_(releaseJson, limit) {
   var releases = releaseJson;
   if (typeof releases === 'string') {
     try {
@@ -60,8 +65,11 @@ function pickNewestBuildTags_(releaseJson) {
   }
   matched.sort(function (a, b) { return b.number - a.number; });
 
+  var want = limit === undefined || limit === null ? 2 : Math.floor(Number(limit));
+  if (!(want > 0)) want = 2;
+
   var tags = [];
-  for (var j = 0; j < matched.length && tags.length < 2; j++) {
+  for (var j = 0; j < matched.length && tags.length < want; j++) {
     if (tags.indexOf(matched[j].tag) === -1) tags.push(matched[j].tag);
   }
   return tags;
@@ -324,6 +332,7 @@ function doGet(e) {
     return renderErrorScreen_('Keystone could not read the Settings tab: ' + err);
   }
 
+  var devGates = params.dev === 'gates' && access.role === 'owner';
   var channel = resolveChannel_(params);
   var release = applyTagOverride_(resolveRelease_(channel, settings), params.tag, access.role);
   if (release.error) return renderErrorScreen_(release.error);
@@ -342,7 +351,13 @@ function doGet(e) {
     degraded: !!release.degraded,
     degradedReason: release.degradedReason,
     loaderMode: loaderMode,
-    devGates: params.dev === 'gates' && access.role === 'owner',
+    devGates: devGates,
+    // Ticket 004 writes these after every server update, so ?dev=gates always
+    // has an answer to "what server code is actually running". Owner-only and
+    // gates-only: it is a build tag and six truncated digests of public files,
+    // but no page needs it to boot.
+    serverTag: devGates ? String(settings[KS_SETTING_SERVER_TAG] || '') : '',
+    serverFingerprint: devGates ? String(settings[KS_SETTING_SERVER_FINGERPRINT] || '') : '',
     devGate3: params.dev === 'gate3' && access.role === 'owner',
     gate3Evict: params.evict === undefined || params.evict === '' ? null : Number(params.evict),
     gate3Cold: params.cold === '1',
@@ -351,7 +366,7 @@ function doGet(e) {
   });
   template.base = base;
   template.loaderMode = loaderMode;
-  template.devGates = params.dev === 'gates' && access.role === 'owner';
+  template.devGates = devGates;
   template.devGate3 = params.dev === 'gate3' && access.role === 'owner';
   template.inlineStyles = loaderMode === 'inline' ? getInlineAsset_(base, 'styles.css') : '';
   template.inlineBundles = loaderMode === 'inline' ? inlineBundleSources_(release.tag, base) : [];
@@ -574,6 +589,9 @@ function onOpen() {
     .createMenu('Keystone')
     .addItem('Open test URL', 'ksMenuOpenTestUrl')
     .addItem('Open stable URL', 'ksMenuOpenStableUrl')
+    .addSeparator()
+    .addItem('Update server code…', 'ksMenuUpdateServerCode')
+    .addItem('Promote server code to stable…', 'ksMenuPromoteServerToStable')
     .addToUi();
 }
 

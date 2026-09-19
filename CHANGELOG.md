@@ -224,3 +224,61 @@ Documentation only; no source or build changes.
   in 57.3 s. The fallback's per-miss cost is real, bounded to one re-prime, and
   still below the 7,412.9 ms every chunk paid before 005.
 - Save is unchanged as expected: 68.2 → 70.8 → 68.2 s across the three runs.
+
+## 004 — Server updater and gate 6
+
+The last piece of Phase 0 machinery (spec §2.1 gate 6, §2.2, §3.2, §16, §18;
+ADR 0002). Ends the copy-paste-and-deploy ritual for the test channel.
+
+Added:
+- `src/server/Updater.gs`: the whole gate-6 sequence. A tag picker listing the
+  newest ten `build-*` releases with their dates and a badge on the one the
+  project is running; fetch of `dist/server/*` at the chosen tag; SHA-256 of
+  every fetched file checked against the release manifest; a merge-not-replace
+  write through the Apps Script API; a new version; and a repoint of the
+  **test** deployment. Promotion to **stable** is a separate menu item that
+  creates nothing and only moves a version that is already on test.
+- Pure helpers, all unit-tested: `updaterEntryForPath_` (extension → Apps Script
+  file type, unknown extensions abort), `mapServerEntries_`, `manifestDigests_`,
+  `bytesToHex_`, `mergeProjectFiles_`, `fingerprintDigests_`, `backupFileName_`,
+  `staleBackupNames_`, `releaseDatesByTag_`, `updaterApiHint_`.
+- `docs/decisions/0002-updater-manages-versions-and-deployments.md`, verbatim.
+- 33 tests in `tests/server-logic.test.js` and 2 in `tests/manifest.test.js`.
+
+Changed:
+- `src/server/appsscript.json`: added the `script.deployments` scope. **This
+  forces re-authorization** — the first run after this merges prompts the owner
+  again, and every other user the next time they open the web app (ADR 0002).
+- `src/server/Code.gs`: the menu gains *Update server code…* and *Promote server
+  code to stable…*, both owner-only. `pickNewestBuildTags_` takes an optional
+  limit (default 2, unchanged for the loader) so the picker asks the same
+  function for ten instead of carrying a second copy of the selection logic.
+  `?dev=gates` now carries `server_tag` and `server_fingerprint`.
+- `src/server/Storage.gs`: `writeSetting_` extracted from `api_setSetting`, which
+  now delegates to it, so the updater's `server_tag` and `server_fingerprint`
+  writes use the same upsert.
+- `src/server/Index.html`: the `?dev=gates` panel prints which server code is
+  running, or says plainly that no update has been run yet.
+- `docs/SETUP.md`: step 4 is now a one-time bootstrap of **five** files
+  (`Api.gs` and `Updater.gs` were missing from the list); a new step turns on the
+  Apps Script API, which is off by default per account and otherwise fails the
+  first run with a 403; both deployment IDs go into `Settings`; a new step 13
+  covers updating and promoting from the menu; and the manual
+  restore-from-backup procedure and five new troubleshooting entries are added.
+- `docs/PHASE0_RESULTS.md`: a gate 6 section with the table the owner's live run
+  fills in, including the row that *is* the gate — the project's files change
+  with nobody opening the Apps Script editor.
+
+Safety properties worth keeping:
+- **Any digest mismatch aborts before a single write.** A partial or tampered
+  server push is worse than a stale one.
+- **The PUT merges.** `PUT .../content` replaces the entire project, so a file
+  the release does not name is carried through untouched, and a payload that
+  would omit `appsscript` is refused outright — losing the manifest takes the
+  scopes and the web app configuration with it.
+- **Every run backs the project up first**, to `server-backup-<timestamp>.json`
+  in the Builds folder, ten kept.
+- **The OAuth token never leaves the server.** It goes into the `Authorization`
+  header and nowhere else; a test asserts it appears in no result, log row, or
+  backup. This is the opposite case to the client-side Drive token ticket 005
+  rejected, and the distinction is exactly where the token lives.

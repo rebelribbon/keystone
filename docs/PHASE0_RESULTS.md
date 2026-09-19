@@ -10,7 +10,7 @@ is outstanding.
 | 3 — Round-trip | **PASS** | 5,242,880 bytes, digests match | 5 MB saved to Drive gzip + chunked and loaded back byte-identical. Load 518.9 s → 48.3 s after ticket 005. Detail below. |
 | 4 — Storage | **PASS** | read-back byte-identical | IndexedDB works inside the deployed iframe, so the thumbnail cache does not need the memory fallback. |
 | 5 — Release | **PASS** | `build-4` | Merging to `main` tags a build, the `release` branch carries `dist/`, and jsDelivr serves it with no manual step. |
-| 6 — Updater | pending — ticket 004 live run | | Sheet menu *Keystone → Update server code* writes `dist/server/*` from a tag, creates a version, and repoints the test deployment. Code landed in ticket 004; the owner's live run fills this row. |
+| 6 — Updater | pending — ticket 004 live run | | Sheet menu *Keystone → Update server code* writes `dist/server/*` from a tag, creates a version, and repoints the test deployment. Code landed in ticket 004; the owner's live run fills this row. See below. |
 
 Gates 1, 2, 4, 5 were run at 2026-09-18T23:05:42.749Z on tag `build-4`.
 Gate 3 was first run at 2026-09-19T16:54:39Z on tag `build-6` and re-run twice
@@ -130,3 +130,32 @@ gate 5 covers.
 Gate 6 is the exception by design: it is the first gate that must be run on
 **test**, because repointing the test deployment is what it does. Its row above
 records the channel with the rest of its figures once the owner runs it.
+
+## Gate 6 — the updater, awaiting the live run
+
+Ticket 004 landed `src/server/Updater.gs`, the two menu items, the
+`script.deployments` scope (ADR 0002), and the `testDeploymentId` /
+`stableDeploymentId` Settings keys. The Builder cannot deploy or run Apps Script
+from a cloud session, so the gate itself is the owner's to run. Fill this table
+from the completion dialog:
+
+| Measure | Value |
+|---|---|
+| Tag written | _pending_ |
+| Version created | _pending_ |
+| Files written | _pending_ (expect 6) |
+| Elapsed | _pending_ (the dialog reports it) |
+| Apps Script editor opened? | _pending_ (must be **no** — that is the gate) |
+| Test URL after the run | _pending_ (`?dev=gates` should show the new `server_tag`) |
+| Stable URL after the run | _pending_ (must still show the **old** `server_tag`) |
+| After *Promote to stable* | _pending_ (stable matches test) |
+| Backup file in the Builds folder | _pending_ (`server-backup-<timestamp>.json`) |
+| Channel | test, then stable on promotion |
+| Result | _pending_ |
+
+The gate is what the fifth row says: the project's files change with nobody
+opening the Apps Script editor. Everything else on the list is there so a
+half-working run cannot be recorded as a pass.
+
+Phase 0 closes when this table is filled in and passing. The other five gates
+are recorded above.

@@ -107,6 +107,39 @@ function invalidateSettings_() {
 }
 
 /**
+ * Write one `Settings` key, updating the row in place or appending it, and drop
+ * the cache so the next read sees it.
+ *
+ * Extracted from `api_setSetting` in ticket 004 so the updater's `server_tag`
+ * and `server_fingerprint` writes go through the same upsert instead of a second
+ * copy of it. The caller does the authorization; this does not.
+ * @param {string} key
+ * @param {*} value
+ */
+function writeSetting_(key, value) {
+  var name = String(key == null ? '' : key).trim();
+  if (!name) throw ksError_('BAD_REQUEST', 'A settings key is required.');
+
+  var sheet = SpreadsheetApp.getActive().getSheetByName('Settings');
+  if (!sheet) throw ksError_('SETTINGS_TAB_MISSING', 'The Settings tab is missing.');
+
+  var values = sheet.getDataRange().getValues() || [];
+  var rowNumber = 0;
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][0] == null ? '' : values[i][0]).trim() === name) {
+      rowNumber = i + 1;
+      break;
+    }
+  }
+  if (rowNumber) {
+    sheet.getRange(rowNumber, 2).setValue(value);
+  } else {
+    sheet.appendRow([name, value]);
+  }
+  invalidateSettings_();
+}
+
+/**
  * A user's role from the `Users` tab, or null when the account is not listed.
  * The rows are cached for 300 s, not the per-email answer.
  * @param {string} email
