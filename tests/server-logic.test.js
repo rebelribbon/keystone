@@ -105,7 +105,7 @@ function createServer(options = {}) {
   vm.runInContext(STORAGE_SRC, sandbox, { filename: "Storage.gs" });
   vm.runInContext(CODE_SRC, sandbox, { filename: "Code.gs" });
   vm.runInContext(API_SRC, sandbox, { filename: "Api.gs" });
-  return { g: sandbox, store, logRows, fetches };
+  return { g: sandbox, store, logRows, fetches, cache };
 }
 
 function releases(...tagNames) {
@@ -618,5 +618,189 @@ describe("api_saveChunk chunk cap", () => {
     expect(g.api_getBundle("../../etc", "engine.js")).toMatchObject({ code: "BAD_REQUEST" });
     expect(g.api_getBundle("build-5", "../../../secrets")).toMatchObject({ code: "BAD_REQUEST" });
     expect(g.api_getBundle("build-5", "styles.css")).toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("load path chunk cache (ticket 005)", () => {
+  const OWNER = {
+    email: "owner@example.com",
+    usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]],
+  };
+  const UPDATED = "2026-09-19T16:54:39.000Z";
+  const BUILD_ID = "b_cache01";
+
+  /** A build whose file is big enough to span several 100,000-char chunks. */
+  function withBuild(extra) {
+    return {
+      ...OWNER,
+      ...extra,
+      buildsRows: [
+        BUILDS_HEADER,
+        [BUILD_ID, "Cached", "owner@example.com", "", 1, "", "", UPDATED, UPDATED, "file_1", "", 1, ""],
+      ],
+    };
+  }
+
+  /** Deterministic 187,500-byte payload -> 250,000 base64 chars -> 3 chunks. */
+  function payload() {
+    const bytes = Buffer.alloc(187500);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 7) & 0xff;
+    return bytes;
+  }
+
+  /** Swap readBuildFile_ for a counting stub and return the call counter. */
+  function stubDriveRead(g, bytes) {
+    const calls = { count: 0 };
+    g.readBuildFile_ = () => {
+      calls.count++;
+      return bytes;
+    };
+    return calls;
+  }
+
+  it("a cache hit returns the cached chunk and never touches Drive", () => {
+    const { g } = createServer(withBuild());
+    const bytes = payload();
+    const reads = stubDriveRead(g, bytes);
+
+    const info = g.api_loadBuildInfo(BUILD_ID);
+    expect(info.totalChunks).toBe(3);
+    expect(info.cacheKeyBase).toBe(`ks_dl_${BUILD_ID}_${Date.parse(UPDATED)}`);
+    expect(reads.count).toBe(1); // the one encode api_loadBuildInfo already paid for
+
+    const result = g.api_loadChunk(BUILD_ID, 1, info.cacheKeyBase);
+    expect(result.cached).toBe(true);
+    expect(reads.count).toBe(1); // unchanged: the hit did no Drive read at all
+  });
+
+  it("a miss returns the same bytes as a hit, and re-populates the key", () => {
+    const { g, cache } = createServer(withBuild());
+    const bytes = payload();
+    stubDriveRead(g, bytes);
+
+    const info = g.api_loadBuildInfo(BUILD_ID);
+    const key = `${info.cacheKeyBase}_2`;
+
+    // What the warm path returns for chunk 2.
+    const hit = g.api_loadChunk(BUILD_ID, 2, info.cacheKeyBase);
+    expect(hit.cached).toBe(true);
+
+    // Evict exactly that key and ask again.
+    cache.remove(key);
+    const miss = g.api_loadChunk(BUILD_ID, 2, info.cacheKeyBase);
+
+    expect(miss.cached).toBe(false);
+    // The property the whole design rests on: the two paths agree byte for byte.
+    expect(miss.chunk).toBe(hit.chunk);
+    expect(miss.chunk).toBe(
+      Buffer.from(bytes).toString("base64").substr(2 * 100000, 100000)
+    );
+    // And the miss put the key back.
+    expect(cache.get(key)).toBe(hit.chunk);
+    expect(g.api_loadChunk(BUILD_ID, 2, info.cacheKeyBase).cached).toBe(true);
+  });
+
+  it("a null cacheKeyBase always takes the slow path", () => {
+    const { g } = createServer(withBuild());
+    const bytes = payload();
+    const reads = stubDriveRead(g, bytes);
+
+    const info = g.api_loadBuildInfo(BUILD_ID);
+    const before = reads.count;
+
+    const cold = g.api_loadChunk(BUILD_ID, 0, null);
+    expect(cold.cached).toBe(false);
+    expect(reads.count).toBe(before + 1);
+    expect(cold.chunk).toBe(Buffer.from(bytes).toString("base64").substr(0, 100000));
+
+    // Undefined and empty string behave the same way.
+    expect(g.api_loadChunk(BUILD_ID, 0).cached).toBe(false);
+    expect(g.api_loadChunk(BUILD_ID, 0, "").cached).toBe(false);
+  });
+
+  it("a cache get that throws is a miss, not an error", () => {
+    const { g, cache } = createServer(withBuild());
+    const bytes = payload();
+    stubDriveRead(g, bytes);
+    const info = g.api_loadBuildInfo(BUILD_ID);
+
+    // Throw only for download keys. A blanket throw would also break the Users
+    // lookup in the auth path and the call would come back ACCESS_DENIED,
+    // which tests something else entirely (see the Handoff).
+    const realGet = cache.get.bind(cache);
+    cache.get = (key) => {
+      if (String(key).indexOf("ks_dl_") === 0) throw new Error("cache backend unavailable");
+      return realGet(key);
+    };
+
+    const result = g.api_loadChunk(BUILD_ID, 1, info.cacheKeyBase);
+    expect(result.code).toBeUndefined();
+    expect(result.cached).toBe(false);
+    expect(result.chunk).toBe(Buffer.from(bytes).toString("base64").substr(100000, 100000));
+  });
+
+  it("a cold cache produces the same whole payload as a warm one", () => {
+    const bytes = payload();
+    const join = (g, base) => {
+      const out = [];
+      for (let i = 0; i < 3; i++) out.push(g.api_loadChunk(BUILD_ID, i, base).chunk);
+      return out.join("");
+    };
+
+    const warm = createServer(withBuild());
+    stubDriveRead(warm.g, bytes);
+    const warmInfo = warm.g.api_loadBuildInfo(BUILD_ID);
+
+    const cold = createServer(withBuild());
+    stubDriveRead(cold.g, bytes);
+    cold.g.api_loadBuildInfo(BUILD_ID);
+
+    expect(join(warm.g, warmInfo.cacheKeyBase)).toBe(join(cold.g, null));
+    expect(join(cold.g, null)).toBe(Buffer.from(bytes).toString("base64"));
+  });
+
+  it("a re-saved build never serves chunks from the previous revision", () => {
+    const later = "2026-09-19T18:00:00.000Z";
+    const { g } = createServer(withBuild());
+    stubDriveRead(g, payload());
+
+    const first = g.api_loadBuildInfo(BUILD_ID);
+    expect(first.cacheKeyBase).toContain(String(Date.parse(UPDATED)));
+
+    // Simulate a re-save: the row's `updated` moves on.
+    const table = g.readBuildsSheet_();
+    table.rows[0][BUILDS_HEADER.indexOf("updated")] = later;
+
+    const second = g.api_loadBuildInfo(BUILD_ID);
+    expect(second.cacheKeyBase).toBe(`ks_dl_${BUILD_ID}_${Date.parse(later)}`);
+    expect(second.cacheKeyBase).not.toBe(first.cacheKeyBase);
+  });
+
+  it("rejects a cacheKeyBase that points outside this build's key space", () => {
+    const { g } = createServer(withBuild());
+    expect(g.isDownloadKeyBase_(`ks_dl_${BUILD_ID}_123`, BUILD_ID)).toBe(true);
+    // A crafted base must not be able to read another key space.
+    expect(g.isDownloadKeyBase_("ks_upload_someoneelse", BUILD_ID)).toBe(false);
+    expect(g.isDownloadKeyBase_("ks_settings", BUILD_ID)).toBe(false);
+    expect(g.isDownloadKeyBase_("ks_dl_b_other_123", BUILD_ID)).toBe(false);
+    expect(g.isDownloadKeyBase_(`ks_dl_${BUILD_ID}_12_3`, BUILD_ID)).toBe(false);
+    expect(g.isDownloadKeyBase_(null, BUILD_ID)).toBe(false);
+  });
+
+  it("api_devEvictChunk is owner-only, validated, and client-callable", () => {
+    const { g, cache } = createServer(withBuild());
+    stubDriveRead(g, payload());
+    const info = g.api_loadBuildInfo(BUILD_ID);
+
+    expect(g.api_devEvictChunk(info.cacheKeyBase, 1)).toEqual({ ok: true, evicted: 1 });
+    expect(cache.get(`${info.cacheKeyBase}_1`)).toBeNull();
+    expect(g.api_devEvictChunk("not-a-key-base", 1)).toMatchObject({ code: "BAD_REQUEST" });
+
+    const editor = createServer({
+      ...withBuild(),
+      email: "ed@example.com",
+      usersRows: [USERS_HEADER, ["ed@example.com", "editor", ""]],
+    });
+    expect(editor.g.api_devEvictChunk("ks_dl_b_x_1", 1)).toMatchObject({ code: "FORBIDDEN" });
   });
 });

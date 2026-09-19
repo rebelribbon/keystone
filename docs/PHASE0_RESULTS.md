@@ -50,29 +50,39 @@ The chunk ladder behaved as ticket 003 §7 predicted: four rejections at 1.5 MB,
 750 KB, 375 KB and 187.5 KB, then success at the 100 KB floor, giving 70 chunks
 and 5 upload attempts.
 
-### Timings, and the asymmetry §7 did not anticipate
+### Timings — before and after ticket 005
 
 **Save: 68.2 s.** Under the 90 s threshold ticket 003 §7 set, so the escalation
-it describes — an ADR moving chunk staging off `CacheService` — is not triggered
-by the save path.
+it describes was never triggered. Unchanged by ticket 005, which does not touch
+the save path.
 
-**Load: 518.9 s.** That is 8.6 minutes, and **7.61x the save over the same 70
-chunks**: 7.41 s per chunk on load against 0.97 s on save. §7 anticipated the
-save being slow and said nothing about the load, so this is a new measurement,
-not a predicted one. The full round trip is 9.8 minutes.
+**Load, before ticket 005: 518.9 s.** That is 8.6 minutes and **7.61x the save
+over the same 70 chunks** — 7.41 s per chunk down against 0.97 s up. §7
+anticipated the save being slow and said nothing about the load.
 
-The likely mechanism is already recorded in the ticket 003 Handoff as a known
-shape of the implementation: `api_loadChunk` re-reads the whole Drive file and
-re-base64-encodes it on **every** call, then returns a single 100,000-character
-slice. Seventy chunks therefore means seventy full 5 MB Drive reads and seventy
-full 7 MB base64 encodes, where the save path's `api_saveChunk` only writes one
-cache key per call. The asymmetry is the same order as the measurement, which is
-consistent but not proof — nothing here isolates Drive read time from encode
-time.
+The cause was not Drive latency. `api_loadChunk` re-read the entire build file
+from Drive and base64-encoded all of it on every call, then returned one
+100 KB slice and discarded the rest: 364 MB read and encoded to deliver 5.2 MB,
+scaling as the square of build size. Ticket 005 moves that work to
+`api_loadBuildInfo`, which was already paying for the same pass and throwing it
+away, and has it prime a per-chunk cache instead.
 
-**This is recorded, not fixed.** Ticket 003 explicitly scopes performance work
-out, and the Architect owns whether the fix is caching the encoded payload,
-staging chunks differently, or something else. Numbers first.
+**Load, after ticket 005: _pending the owner's re-run._**
+
+| | Before (003) | After (005) |
+|---|---|---|
+| Save wall clock | 68.2 s | _pending_ |
+| Load wall clock | 518.9 s | _pending_ |
+| Per-chunk save, median | 970 ms | _pending_ |
+| Per-chunk load, median | 7,410 ms | _pending_ |
+| Median load / median save | 7.61x | _pending_ (budget 1.5x) |
+| Cache hits / misses on load | n/a | _pending_ |
+| Evicted-chunk load time (`&evict=17`) | n/a | _pending_ |
+
+Ticket 005 sets the bar as **median per-chunk load within 1.5x of median
+per-chunk save**, and load wall clock under 120 s. A smaller total that still
+costs seconds per chunk is not this defect fixed; it is this defect plus
+another one, and the Handoff is required to say so.
 
 ## Which channel these were run on
 

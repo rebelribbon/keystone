@@ -344,6 +344,8 @@ function doGet(e) {
     loaderMode: loaderMode,
     devGates: params.dev === 'gates' && access.role === 'owner',
     devGate3: params.dev === 'gate3' && access.role === 'owner',
+    gate3Evict: params.evict === undefined || params.evict === '' ? null : Number(params.evict),
+    gate3Cold: params.cold === '1',
     bundles: KS_CLIENT_BUNDLES,
     firstRenderBudgetMs: KS_FIRST_RENDER_BUDGET_MS
   });

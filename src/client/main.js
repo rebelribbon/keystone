@@ -8,12 +8,13 @@ import * as chunker from "./persistence/chunker.js";
 import { callServer } from "./persistence/transport.js";
 import { saveBuild } from "./persistence/save.js";
 import { loadBuild } from "./persistence/load.js";
+import { summarize } from "./persistence/stats.js";
 
 const KS = installNamespace();
 
 // Persistence transport (SPEC §6.4, §14.2). The Store that will feed it arrives
 // in Phase 1; for now the gate 3 harness is the only caller.
-KS.persistence = { codec, chunker, callServer, saveBuild, loadBuild };
+KS.persistence = { codec, chunker, callServer, saveBuild, loadBuild, summarize };
 
 /**
  * Boot the app: log the launch parameters once and mount the Phase 0 cube.

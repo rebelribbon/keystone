@@ -114,3 +114,108 @@ Median, not mean — one slow outlier should not move the number that gets compa
 - [ ] No `TODO` in `src/`, no `localStorage`, no secrets.
 
 ## Handoff (Builder fills in)
+
+### What changed
+
+`api_loadBuildInfo` now keeps the base64 it was already computing and primes a
+per-chunk cache with it; `api_loadChunk` reads that cache and falls back to the
+old path on any miss. The client threads `cacheKeyBase` through and times every
+chunk in both directions. Nothing about the save path changed.
+
+Files: `src/server/Api.gs`, `src/server/Code.gs` (passes `evict`/`cold` into the
+boot payload), `src/server/Index.html` (harness), `src/client/persistence/load.js`,
+`save.js`, new `stats.js`, `src/client/main.js`, `tests/server-logic.test.js`,
+`docs/PHASE0_RESULTS.md`, `docs/DEFERRED.md`, `CHANGELOG.md`.
+
+130 tests across 7 files, `npm run build` passes, `dist/client/` still exactly
+the seven locked files.
+
+### Verified in-session
+
+The real `Api.gs`, `Storage.gs` and `Code.gs` run in a Node sandbox with
+in-memory Apps Script stand-ins, driven by the real client transport and the
+real `Index.html` in headless Chromium. All three modes round-trip 5,242,880
+bytes with digest `065ce635…84d374d7` matching on both sides:
+
+| Run | Cache hits / misses | Gate 3 | Median load / median save |
+|---|---|---|---|
+| `?dev=gate3` | 70 / 0 | PASS | 0.67x |
+| `?dev=gate3&evict=17` | 69 / 1 | PASS | 0.71x |
+| `?dev=gate3&cold=1` | 0 / 70 | PASS | 5.67x |
+
+Screenshot of the evict run: `screenshots/005-gate3-evict-harness.png`.
+
+**Read those ratios as an A/B, not as a prediction.** In the sandbox a "Drive
+read" is a Buffer copy, so every absolute number is meaningless for the
+deployment. What is meaningful is that the same harness, same machine, same
+build, reports 0.67x warm and 5.67x cold. That gap is the defect appearing and
+disappearing on demand, which is the evidence that 005 targets the right
+mechanism. It is not evidence about what the deployment will do.
+
+The `cold=1` run also satisfies the acceptance item about forcing
+`cacheKeyBase` to null: 70 misses, byte-identical output.
+
+### What you have to run
+
+1. **`?dev=gate3` on the stable URL.** The number that decides this ticket is
+   **median per-chunk load against median per-chunk save**, and only a real
+   deployment produces it. Transcribe the whole panel into
+   `docs/PHASE0_RESULTS.md`, which already holds the before column.
+2. **`?dev=gate3&evict=17`.** Must still PASS, and the evicted chunk's own load
+   time is reported separately so the fallback's real cost is visible.
+3. Optionally `?dev=gate3&cold=1` to see the pre-005 behavior on the deployment.
+
+If the median ratio comes back above 1.5x, the diagnosis in this ticket was
+incomplete and the Handoff has to say so with the figures rather than pointing at
+a smaller total. I have not pre-written that sentence, because writing it before
+the measurement exists is how a number gets talked into looking good.
+
+### Deviations and judgement calls
+
+- **`api_loadChunk` now returns `{ chunk, cached }` rather than a bare string.**
+  §5 requires the panel to report cache hits and misses, and the client cannot
+  measure that without being told; inferring it from timing is exactly the kind
+  of heuristic this ticket exists to replace. `load.js` accepts both shapes, so a
+  deployment running an older `Api.gs` than the bundle still loads, it just
+  cannot report hits. This is the one API-surface change and it is not in §14.2's
+  wording, which says "base64 chunk".
+- **`api_devEvictChunk` ships without the trailing underscore** the ticket
+  specifies. `api_devEvictChunk_` cannot be called by `google.script.run`, and
+  the harness calls it from the page, so as written the live exercise in §4 could
+  not run. Same defect class as `api_getBundle_` in 003. It is owner-only and
+  validates its key base.
+- **`cacheKeyBase` is validated against the `buildId`, not trusted.** It is
+  caller-controlled input that becomes a cache key. Without the check, a crafted
+  base could read `ks_upload_*` or `ks_settings` out of the shared script cache.
+  `isDownloadKeyBase_` requires the exact `ks_dl_<buildId>_<alnum>` shape. Do not
+  remove it: the whole point of passing the base is to avoid a Sheet read, so
+  recomputing it server-side to compare would give back the saving.
+- **Batch size 10, not larger.** 10 keys is about 1 MB per `putAll`. The
+  documented cap is per key, not per call, so this is a margin chosen without a
+  measured limit behind it. 70 writes become 7.
+- **The miss path re-populates only the key that missed**, not the whole build.
+  Re-priming everything on a miss would turn one slow read into one slow read
+  plus a full cache rewrite.
+
+### A separate defect found while doing this, not fixed here
+
+**A throwing `CacheService` locks every user out of the app.** `getUserRole_`
+(ticket 002) reads the users cache without guarding the call, `requireAccess_`
+catches whatever escapes and sets `role = null`, and `decideAccess_` turns that
+into `ACCESS_DENIED`. Verified directly: with a listed owner and a
+`CacheService.get` that throws, `api_whoami` returns
+`{ code: 'ACCESS_DENIED' }`.
+
+A transient cache failure should degrade to a Sheet read, the same way this
+ticket makes the download cache degrade to a Drive read. It is the identical
+principle — correctness never depends on the cache — applied to the auth path,
+which predates it.
+
+Out of scope for 005, so it is recorded rather than fixed. It needs its own
+ticket, and it is worth one: the failure mode is every family member locked out
+at once, and it would look like an auth problem rather than a cache problem.
+
+I found it because a first draft of the throwing-cache test stubbed `get` to
+throw for all keys, and the call came back `ACCESS_DENIED` instead of the chunk.
+The test now throws only for `ks_dl_` keys, so it tests the download path
+rather than the auth path.

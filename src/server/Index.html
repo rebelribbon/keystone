@@ -396,14 +396,21 @@
 
     <? if (devGate3) { ?>
     <script>
-      // Owner-only Phase 0 gate 3 harness (SPEC §2.1 gate 3, §6.4).
-      // Round-trips a deterministic 5 MB buffer through the persistence API and
-      // compares SHA-256 before gzip and after gunzip.
+      // Owner-only Phase 0 gate 3 harness (SPEC §2.1 gate 3, §6.4; ticket 005 §4-5).
+      //
+      // Reports per-chunk figures, not just totals. Totals hid the load-path
+      // defect for a whole ticket: 518.9 s reads as "slow network" until you
+      // divide by 70 and compare it against the save side.
+      //
+      //   ?dev=gate3           normal round trip
+      //   ?dev=gate3&evict=17  drop chunk 17 after the cache is primed, to
+      //                        exercise the miss fallback on a live deployment
+      //   ?dev=gate3&cold=1    send no cacheKeyBase, forcing every chunk slow
       window.KSGate3 = (function () {
         var BYTES = 5 * 1024 * 1024;
         var SEED = 0x5eed1e;
+        var MEDIAN_RATIO_BUDGET = 1.5;
 
-        // xorshift32: same bytes every run, no dependence on Math.random.
         function makeBuffer(length, seed) {
           var out = new Uint8Array(length);
           var x = seed >>> 0 || 1;
@@ -423,8 +430,12 @@
           return out;
         }
 
-        function sha256(bytes) {
-          return crypto.subtle.digest('SHA-256', bytes).then(hex);
+        function sha256(bytes) { return crypto.subtle.digest('SHA-256', bytes).then(hex); }
+
+        function ms(n) { return Math.round(n).toLocaleString() + ' ms'; }
+
+        function spread(label, s) {
+          return [label, ms(s.min) + '  /  ' + ms(s.median) + '  /  ' + ms(s.max)];
         }
 
         function paint(boot) {
@@ -435,15 +446,19 @@
           panel.appendChild(card);
 
           var heading = document.createElement('h1');
-          heading.textContent = 'Phase 0 gate 3 — Drive round-trip';
+          heading.textContent = 'Phase 0 gate 3 - Drive round-trip';
           heading.style.margin = '0 0 6px';
           heading.style.fontSize = '20px';
           card.appendChild(heading);
 
+          var mode = [];
+          if (boot.gate3Evict !== null && boot.gate3Evict !== undefined) mode.push('evict chunk ' + boot.gate3Evict);
+          if (boot.gate3Cold) mode.push('cold, no cacheKeyBase');
+
           var meta = document.createElement('p');
           meta.className = 'ks-gates__meta';
           meta.textContent = 'tag ' + boot.tag + '  ·  channel ' + boot.channel +
-            '  ·  ' + new Date().toISOString();
+            (mode.length ? '  ·  ' + mode.join(', ') : '') + '  ·  ' + new Date().toISOString();
           card.appendChild(meta);
 
           var status = document.createElement('p');
@@ -480,7 +495,9 @@
           run: function (boot) {
             var view = paint(boot);
             var rows = [];
-            var buffer, sourceDigest, saved, loaded, loadedDigest;
+            var evictAt = boot.gate3Evict;
+            var summarize = KS.persistence.summarize;
+            var buffer, sourceDigest, saved, loaded;
 
             function show(note) {
               view.status.textContent = note;
@@ -499,10 +516,9 @@
                 return KS.persistence.saveBuild(buffer, { name: 'gate3-roundtrip', schema: 1 }, {
                   onProgress: function (p) {
                     if (p.phase === 'upload') {
-                      view.status.textContent = 'Uploading chunk ' + p.index + ' of ' + p.total +
-                        ' at ' + p.chunkSize.toLocaleString() + ' chars...';
+                      view.status.textContent = 'Uploading chunk ' + p.index + ' of ' + p.total + '...';
                     } else if (p.phase === 'resize') {
-                      view.status.textContent = 'Server rejected that chunk size; retrying at ' +
+                      view.status.textContent = 'Chunk rejected; retrying at ' +
                         p.chunkSize.toLocaleString() + ' chars...';
                     }
                   }
@@ -515,10 +531,16 @@
                 rows.push(['Final chunk size', result.chunkSize.toLocaleString() + ' chars']);
                 rows.push(['Chunk count', String(result.chunkCount)]);
                 rows.push(['Upload attempts', String(result.uploadAttempts)]);
-                rows.push(['Save wall clock', result.seconds.toFixed(1) + ' s']);
                 rows.push(['buildId', result.buildId]);
                 show('Loading back from Drive...');
+
                 return KS.persistence.loadBuild(result.buildId, {
+                  forceCold: !!boot.gate3Cold,
+                  onInfo: function (info) {
+                    if (evictAt === null || evictAt === undefined) return null;
+                    view.status.textContent = 'Evicting chunk ' + evictAt + ' to exercise the fallback...';
+                    return KS.persistence.callServer('api_devEvictChunk', [info.cacheKeyBase, evictAt]);
+                  },
                   onProgress: function (p) {
                     view.status.textContent = 'Downloading chunk ' + p.index + ' of ' + p.total + '...';
                   }
@@ -526,24 +548,47 @@
               })
               .then(function (result) {
                 loaded = result;
-                rows.push(['Load wall clock', result.seconds.toFixed(1) + ' s']);
                 rows.push(['Bytes read back', result.bytes.length.toLocaleString() + ' bytes']);
                 return sha256(result.bytes);
               })
               .then(function (digest) {
-                loadedDigest = digest;
+                var saveStats = summarize(saved.chunkMs);
+                var loadStats = summarize(loaded.chunkMs);
+                var ratio = saveStats.median > 0 ? loadStats.median / saveStats.median : Infinity;
+                var withinBudget = ratio <= MEDIAN_RATIO_BUDGET;
+
+                rows.push(spread('Per-chunk save   min / median / max', saveStats));
+                rows.push(spread('Per-chunk load   min / median / max', loadStats));
+                rows.push(['Save wall clock', saved.seconds.toFixed(1) + ' s']);
+                rows.push(['Load wall clock', loaded.seconds.toFixed(1) + ' s']);
+                rows.push(['Cache hits / misses on load', loaded.cacheHits + ' / ' + loaded.cacheMisses]);
+
+                if (evictAt !== null && evictAt !== undefined && loaded.chunkMs[evictAt] !== undefined) {
+                  rows.push(['Evicted chunk ' + evictAt + ' load time', ms(loaded.chunkMs[evictAt])]);
+                }
+
+                rows.push([
+                  'Median load / median save',
+                  (isFinite(ratio) ? ratio.toFixed(2) + 'x' : 'n/a') + '   (budget ' + MEDIAN_RATIO_BUDGET + 'x)',
+                  withinBudget ? 'ks-pass' : 'ks-fail'
+                ]);
+
                 rows.push(['SHA-256 after gunzip', digest]);
                 var pass = digest === sourceDigest && loaded.bytes.length === BYTES;
                 rows.push(['Gate 3', pass ? 'PASS' : 'FAIL', pass ? 'ks-pass' : 'ks-fail']);
+
                 show(pass
                   ? 'Byte-identical round trip. Cleaning up the test build...'
                   : 'Digests differ. Cleaning up the test build...');
+                console.log('[KS] gate3', {
+                  source: sourceDigest, loaded: digest, save: saveStats, load: loadStats,
+                  ratio: ratio, cacheHits: loaded.cacheHits, cacheMisses: loaded.cacheMisses
+                });
                 return KS.persistence.callServer('api_deleteBuild', [saved.buildId]);
               })
               .then(function () {
                 rows.push(['Test build', 'soft-deleted']);
                 show('Done. Transcribe these into docs/PHASE0_RESULTS.md.');
-                console.log('[KS] gate3', { source: sourceDigest, loaded: loadedDigest, saved: saved });
               })
               .catch(function (err) {
                 rows.push(['Gate 3', 'FAIL', 'ks-fail']);
