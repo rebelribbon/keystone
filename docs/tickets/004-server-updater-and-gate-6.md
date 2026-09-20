@@ -293,3 +293,34 @@ the Builder's to edit, so this note is the whole of my action on it.
 
 **Cost to the owner:** one more re-authorization prompt, on top of the one ADR
 0002 already predicted. Same prompt, same reason — the scope list changed.
+
+### Follow-up: error messages that guessed (owner-reported)
+
+**Symptom:** the updater aborted at the backup step with *"The Settings key
+builds_folder_id does not name a Drive folder this account can open."* The id was
+right and the folder opened in a browser as the same account. The message was a
+`catch` block asserting a cause it had not checked.
+
+That was the third message in one day to name a plausible-but-wrong cause, after
+the `Ui.showModalDialog` scope error and the digest-gate wording. The cost is not
+the bad message; it is the time spent chasing what the message named.
+
+**What changed.** `getBuildsFolder_` and `readBuildFile_` now report the call,
+the id, the verbatim exception and the running identity, and state that this does
+not establish the id is wrong. `describeError_` and `identityNote_` are the
+shared, pure pieces. The Apps Script API error leads with the response body and
+labels its hypothesis *"Possible cause:"* — the one sanctioned guess, and now an
+obvious one.
+
+**What was added, beyond the literal ask.** A *Diagnose access…* menu item. The
+reason it is in scope: the owner's second question was "what else could cause
+this", and adding a fourth hypothesis to three failed ones is not an answer. The
+diagnostic replaces the question with a measurement — granted scopes from
+Google's tokeninfo endpoint, plus a probe per service, each reporting verbatim.
+`Drive at all` versus `Builds folder` is the discriminator that the original
+message destroyed by collapsing every Drive failure into one sentence about the
+id.
+
+**The general rule now pinned by tests:** a message may state what was attempted
+and what came back. It may state a cause only when it verified one, or when the
+hypothesis is labelled and follows the verbatim response.

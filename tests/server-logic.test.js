@@ -96,7 +96,11 @@ function createServer(options = {}) {
       getActive: () => ({ getSheetByName: (name) => sheets[name] || null }),
     },
     CacheService: { getScriptCache: () => cache },
-    Session: { getActiveUser: () => ({ getEmail: () => email }) },
+    Session: {
+      getActiveUser: () => ({ getEmail: () => email }),
+      // The identity whose authorization Drive and Sheet calls actually use.
+      getEffectiveUser: () => ({ getEmail: () => email }),
+    },
     ScriptApp: {
       getService: () => ({ getUrl: () => serviceUrl }),
       getScriptId: () => scriptId,
@@ -1382,6 +1386,7 @@ describe("the updater is owner-only at every entry point", () => {
     ["ksUpdaterApplyTag", [TAG]],
     ["ksUpdaterDeploymentState", []],
     ["ksUpdaterPromote", [11]],
+    ["ksUpdaterDiagnoseAccess", []],
   ];
 
   it("refuses an editor with FORBIDDEN and writes nothing", () => {
@@ -1415,8 +1420,13 @@ describe("the updater is owner-only at every entry point", () => {
     });
     g.ksMenuUpdateServerCode();
     g.ksMenuPromoteServerToStable();
+    g.ksMenuDiagnoseAccess();
     expect(dialogs).toHaveLength(0);
-    expect(drive.toasts).toEqual(["Keystone: owner only.", "Keystone: owner only."]);
+    expect(drive.toasts).toEqual([
+      "Keystone: owner only.",
+      "Keystone: owner only.",
+      "Keystone: owner only.",
+    ]);
   });
 });
 
@@ -1430,6 +1440,7 @@ describe("the updater menu and dialogs", () => {
       "Open stable URL",
       "Update server code…",
       "Promote server code to stable…",
+      "Diagnose access…",
     ]);
     // Every menu target must exist, or the item throws when clicked.
     for (const item of g.__menu.items) expect(typeof g[item.fn]).toBe("function");
@@ -1440,7 +1451,8 @@ describe("the updater menu and dialogs", () => {
     const { g, dialogs } = updaterServer(fixture);
     g.ksMenuUpdateServerCode();
     g.ksMenuPromoteServerToStable();
-    expect(dialogs).toHaveLength(2);
+    g.ksMenuDiagnoseAccess();
+    expect(dialogs).toHaveLength(3);
 
     for (const dialog of dialogs) {
       const script = dialog.html.split("<script>")[1].split("</script>")[0];
@@ -1501,5 +1513,186 @@ describe("appsscript.json scopes cover what the server calls", () => {
   it("matches the manifest the build copies into dist/server", () => {
     expect(MANIFEST.oauthScopes).toEqual([...new Set(MANIFEST.oauthScopes)]);
     expect(MANIFEST.runtimeVersion).toBe("V8");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Error messages report; they do not diagnose.
+ *
+ * Three failures in one day carried a message that named a plausible but wrong
+ * cause, and each one sent the reader after the wrong thing. The rule these
+ * tests pin: a message may say what was attempted and what came back, and may
+ * offer a hypothesis only when it is labelled as one and follows the verbatim
+ * response.
+ * ------------------------------------------------------------------------ */
+describe("Drive failures surface the underlying exception", () => {
+  function serverWithDrive(driveImpl, settings = [["builds_folder_id", "FOLDER"]]) {
+    const ctx = createServer({
+      email: OWNER,
+      usersRows: [USERS_HEADER, [OWNER, "owner", ""]],
+      settingsRows: [SETTINGS_HEADER, ...settings],
+    });
+    Object.assign(ctx.g.DriveApp, driveImpl);
+    return ctx;
+  }
+
+  it("getBuildsFolder_ reports what Apps Script said, not a theory about the id", () => {
+    const { g } = serverWithDrive({
+      getFolderById: () => {
+        const err = new Error("Access denied: DriveApp.");
+        err.name = "ScriptError";
+        throw err;
+      },
+    });
+
+    let thrown;
+    try {
+      g.getBuildsFolder_();
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown.ksCode).toBe("DRIVE_FOLDER_FAILED");
+    // The verbatim exception, the call that made it, and the id it was given.
+    expect(thrown.message).toContain("Access denied: DriveApp.");
+    expect(thrown.message).toContain("ScriptError");
+    expect(thrown.message).toContain('getFolderById("FOLDER")');
+    // The identity, because a permission error is meaningless without it.
+    expect(thrown.message).toContain(OWNER);
+    // And explicitly NOT the old guess.
+    expect(thrown.message).not.toMatch(/does not name a Drive folder/);
+  });
+
+  it("still says plainly when the setting really is absent", () => {
+    const { g } = serverWithDrive({}, []);
+    expect(() => g.getBuildsFolder_()).toThrow(/is missing or empty/);
+    // That one is a fact: the code checked the cell and it was blank.
+  });
+
+  it("readBuildFile_ reports the exception too", () => {
+    const { g } = serverWithDrive({
+      getFileById: () => {
+        throw new Error("File not found: 1abc");
+      },
+    });
+    let thrown;
+    try {
+      g.readBuildFile_("1abc");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown.ksCode).toBe("BUILD_FILE_FAILED");
+    expect(thrown.message).toContain("File not found: 1abc");
+    expect(thrown.message).not.toMatch(/could not be opened from Drive\.$/);
+  });
+
+  it("describeError_ never invents text and survives a non-Error throw", () => {
+    const { g } = createServer();
+    expect(g.describeError_(null)).toBe("(no error object)");
+    expect(g.describeError_("plain string")).toBe("plain string");
+    const named = new Error("boom");
+    named.name = "TypeError";
+    expect(g.describeError_(named)).toBe("TypeError: boom");
+    // No duplicated prefix when the message already carries the name.
+    const prefixed = new Error("TypeError: boom");
+    prefixed.name = "TypeError";
+    expect(g.describeError_(prefixed)).toBe("TypeError: boom");
+  });
+
+  it("identityNote_ degrades to a note rather than throwing", () => {
+    const { g } = createServer({ email: "" });
+    g.Session.getEffectiveUser = () => {
+      throw new Error("no effective user");
+    };
+    const note = g.identityNote_();
+    expect(note).toContain("(blank)");
+    expect(note).toContain("no effective user");
+  });
+
+  it("the Apps Script API error leads with the response and labels the guess", () => {
+    const fixture = updaterFixture({
+      apiFailures: { "get /content": { code: 403, body: '{"error":{"message":"API disabled"}}' } },
+    });
+    const { g } = updaterServer(fixture);
+    const message = g.ksUpdaterApplyTag(TAG).message;
+    // Verbatim response before the hypothesis, and the hypothesis marked.
+    expect(message.indexOf("API disabled")).toBeLessThan(message.indexOf("Possible cause:"));
+    expect(message).toContain("Possible cause: ");
+  });
+});
+
+describe("ksUpdaterDiagnoseAccess", () => {
+  it("reports granted scopes and every probe without concluding anything", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    // tokeninfo is the only authority on what was actually granted.
+    const base = fixture.fetchImpl;
+    const withToken = (url, params) => {
+      if (url.startsWith("https://www.googleapis.com/oauth2/v3/tokeninfo")) {
+        return {
+          code: 200,
+          body: JSON.stringify({
+            scope:
+              "https://www.googleapis.com/auth/spreadsheets " +
+              "https://www.googleapis.com/auth/script.external_request",
+          }),
+        };
+      }
+      return base(url, params);
+    };
+    const ctx = createServer({
+      email: OWNER,
+      usersRows: [USERS_HEADER, [OWNER, "owner", ""]],
+      settingsRows: [
+        SETTINGS_HEADER,
+        ["builds_folder_id", "FOLDER"],
+        ["github_repo", "rebelribbon/keystone"],
+        ["asset_base_url", CDN],
+      ],
+      fetchImpl: withToken,
+    });
+    ctx.g.DriveApp.getRootFolder = () => {
+      throw new Error("Access denied: DriveApp.");
+    };
+    ctx.g.DriveApp.getFolderById = () => {
+      throw new Error("Access denied: DriveApp.");
+    };
+
+    const report = ctx.g.ksUpdaterDiagnoseAccess();
+    expect(report.code).toBeUndefined();
+    // The granted list is short — drive is absent, which is the finding.
+    expect(report.grantedScopes).toEqual(["script.external_request", "spreadsheets"]);
+    expect(report.grantedScopes).not.toContain("drive");
+
+    const byLabel = Object.fromEntries(report.probes.map((p) => [p.label.split(" —")[0], p]));
+    expect(byLabel["Sheet read (Settings tab)"].ok).toBe(true);
+    expect(byLabel["Drive at all"].ok).toBe(false);
+    expect(byLabel["Drive at all"].detail).toContain("Access denied: DriveApp.");
+    expect(byLabel["Builds folder"].ok).toBe(false);
+    expect(report.identity).toContain(OWNER);
+
+    // It reports. It does not tell the owner what is wrong.
+    const text = JSON.stringify(report);
+    expect(text).not.toMatch(/you (should|need)|most likely|probably/i);
+  });
+
+  it("never returns the OAuth token", () => {
+    const fixture = updaterFixture();
+    const { g } = updaterServer(fixture);
+    const report = g.ksUpdaterDiagnoseAccess();
+    expect(JSON.stringify(report)).not.toContain("SECRET_TOKEN");
+  });
+
+  it("parseGrantedScopes_ shortens, sorts, and survives junk", () => {
+    const { g } = createServer();
+    expect(
+      g.parseGrantedScopes_(
+        JSON.stringify({
+          scope: "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets",
+        })
+      )
+    ).toEqual(["drive", "spreadsheets"]);
+    expect(g.parseGrantedScopes_("not json")).toEqual([]);
+    expect(g.parseGrantedScopes_(JSON.stringify({}))).toEqual([]);
   });
 });

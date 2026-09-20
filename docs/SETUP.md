@@ -296,6 +296,8 @@ to *Help*, with four items:
   clickable link, because Apps Script cannot retarget the parent tab.
 - *Update server code…* and *Promote server code to stable…* — the updater
   (step 13). Both are owner-only; anyone else gets a one-line "owner only" toast.
+- *Diagnose access…* — what this script can actually reach, and which OAuth
+  scopes were really granted (step 13). Owner-only.
 
 If the menu is missing, the `onOpen` trigger has not run — reload once more.
 
@@ -360,6 +362,29 @@ adds `script.container.ui`, and Google re-prompts whenever the scope list
 changes. Everyone else sees the same prompt the next time they open the web
 app. It is expected, it is not a failure, and the consent screen will again say
 *Google hasn't verified this app* — it is your own script.
+
+### Diagnose access
+
+**Keystone → Diagnose access…** answers "what can this thing actually reach"
+without anybody guessing. It reports:
+
+- which account the code runs as, and which is signed in;
+- **which OAuth scopes Google actually granted** — read from Google's tokeninfo
+  endpoint, not from the manifest. These differ more often than you would
+  expect: the manifest says what was *requested*, and on an unverified app the
+  consent screen lets a user grant a subset;
+- one line per Apps Script service the server depends on: the Settings read,
+  Drive in general, the Builds folder specifically, the Apps Script API, and an
+  external fetch — each either OK or the verbatim exception.
+
+Read it as measurements, not a verdict. The useful comparisons:
+
+| What you see | What it narrows to |
+|---|---|
+| *Drive at all* fails **and** *Builds folder* fails | Drive access as a whole — the scope or the account, not the folder id |
+| *Drive at all* OK, *Builds folder* fails | that specific folder: wrong id, or this account genuinely cannot open it |
+| `drive` absent from *Granted scopes* | the grant, whatever the manifest says |
+| *Apps Script API* fails, everything else OK | the API toggle in step 6b, or `script.projects` |
 
 ### Restoring after a bad server push
 
@@ -468,6 +493,14 @@ as the two updater dialogs. The menu appears without it, which is what makes thi
 confusing: the scope is only checked when a dialog actually opens. Re-paste
 `appsscript.json` from a tag at or after `build-11`, reload the Sheet, and
 re-authorize.
+
+**"The Settings key builds\_folder\_id does not name a Drive folder this account
+can open."**
+That message was wrong and has been removed. A Drive failure now reports the
+exception Apps Script actually raised, the id it was given, and which account it
+ran as. Run **Keystone → Diagnose access…** before changing anything: if
+*Drive at all* fails as well as *Builds folder*, the problem is the `drive`
+scope or the account, not the id.
 
 **The Keystone menu shows "owner only".**
 Updater items are owner-only. Your row in `Users` has role `editor` or `viewer`,
