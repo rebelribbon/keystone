@@ -354,3 +354,44 @@ Added:
 
 Screenshot: `screenshots/004-diagnose-access.png`, driven in headless Chromium
 against the real `.gs` files with Drive stubbed to fail the way it did live.
+
+## 004 follow-up — gate 6 PASSED; Phase 0 verified
+
+Documentation only; no source or build changes.
+
+- `docs/PHASE0_RESULTS.md`: **gate 6 PASS** from the owner's live run
+  (2026-09-20T00:34:44Z). `build-12` written, 6 files, version 23, 12.2 s, backup
+  written first, test deployment repointed, stable untouched, and the Apps Script
+  editor never opened — which is the gate. All six of the recorded fingerprint's
+  digests match the ones `build-12`'s release manifest published, so the project
+  is provably running the bytes CI built and tagged.
+- The file is closed out: **all six gates pass**, each with the channel it was
+  verified on (1–5 stable, 6 test, and why). Phase 0's remaining items are the
+  `v0.0.0` tag and the Architect's `docs/reviews/phase-0.md`, neither of which is
+  a gate and both of which ticket 004 puts out of scope.
+- Recorded what the run did **not** cover, rather than letting a pass imply it:
+  promotion to stable, backup pruning to ten, the deliberate-corruption check,
+  and the missing-`testDeploymentId` message. All four are unit tested; none is
+  part of gate 6's write path.
+- `docs/SETUP.md`: four steps that exist only because ADR 0002 moved Keystone to
+  a **standard** Cloud project, which auto-enables nothing the default hidden
+  project used to do silently:
+  - **6b** create the Cloud project and link the script to it (and the warning
+    that doing so revokes every existing authorization);
+  - **6c** configure the OAuth consent screen under Google Auth Platform →
+    Branding;
+  - **6d** add every Keystone user as a **test user** under Audience — in
+    Testing mode an unlisted account cannot authorize at all;
+  - **6e** enable the **Apps Script API and the Drive API separately**; missing
+    the Drive one is what made `DriveApp` throw on a folder that opened fine in a
+    browser.
+  The old per-account Apps Script API toggle becomes 6f, with an explicit note
+  that 6e and 6f are different switches and both are required.
+- **Access control is now two lists that must agree** — Cloud test users and the
+  `Users` tab — documented in 6d and cross-referenced from step 10, with the
+  distinct failure each half produces: missing from `Users` gives Keystone's
+  access screen and an `access_denied` log row; missing from the test-user list
+  gives a Google error before any Keystone code runs, with nothing logged at all.
+  That absence of a trace is how to tell them apart.
+- Two troubleshooting entries for those failures, and the setup time estimate
+  raised from 30 to 45 minutes.
