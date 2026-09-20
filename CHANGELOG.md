@@ -395,3 +395,45 @@ Documentation only; no source or build changes.
   That absence of a trace is how to tell them apart.
 - Two troubleshooting entries for those failures, and the setup time estimate
   raised from 30 to 45 minutes.
+
+## 007 — Store, commands, and events
+
+Phase 1 begins (spec §0.3, §4.1, §6, §6.4, §7, §18). Pure logic only: no
+rendering, no geometry, no persistence wiring. The deployed page still boots the
+Phase 0 cube and behaves identically.
+
+Added:
+- `src/client/core/document.js`: `SCHEMA_VERSION`, the §6 type prefixes,
+  `newId`, `createBuildDocument`, `serialize` / `deserialize`, and the base64
+  helpers for the terrain heightmap and splat. `createBuildDocument` emits every
+  field §6 lists, including the ones nothing reads yet — a migration two phases
+  from now has to tell "no walls" from "walls were never a field".
+- `src/client/core/store.js`: immutable-by-path Store with structural sharing,
+  a frozen document view, and `change` events carrying `{ dirtyIds,
+  dirtyCategories }`. Categories are derived from the mutated path, so a nested
+  `levels[0].walls.w_1` write is a `walls` change and not a `levels` one.
+- `src/client/core/commands.js`: `run`, `group`, `undo`, `redo`, `history`,
+  merging, and the 500-entry cap (§7, §4.1).
+- `src/client/core/events.js`: typed bus over the §4.1 names. An unknown name
+  throws; a throwing listener does not stop the rest.
+- `src/client/core/build-commands.js`: `SetLevelProps` and `SetEnvironment`, two
+  of §7's required list.
+- `src/client/persistence/migrations.js`: the runner, empty at schema 1. Refuses
+  a document from a newer client rather than silently dropping its fields.
+- 145 tests across five new files, including a 200-command randomized undo
+  symmetry run that checks every intermediate state, not just the end.
+
+Two decisions worth keeping:
+- **§0.3 is enforced, not requested.** A write outside a command throws, and the
+  only thing that can open a write window is a symbol `commands.js` holds. Tools
+  and content reaching `KS.store` physically cannot write.
+- **`setIn(path, undefined)` is refused; removal is `deleteIn`.** Found while
+  writing the undo-symmetry test: undoing a create by writing `undefined` leaves
+  the key present in memory and absent after a JSON round trip, so the document
+  a geometry builder iterates would stop matching the one saved to Drive. Every
+  §7 `Delete*` command and the undo of every `Add*` needs a real delete; the
+  ticket did not call for one.
+
+Changed:
+- `src/client/main.js`: exposes `KS.store`, `KS.commands`, `KS.events`,
+  `KS.document`, `KS.buildCommands` and `KS.migrations`. `KS.boot` is unchanged.
