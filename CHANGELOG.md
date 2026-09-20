@@ -562,3 +562,31 @@ work browser and every stable-URL attempt in the personal one. The comparison
 changed two variables at once. "No conclusion" prompts another look; "wrong
 conclusion" closes the question, and this one stayed closed for three tickets
 and two ADRs. The Handoff proposes the rule addition that would have caught it.
+
+## 009 follow-up — Part C: the jsDelivr purge is verified
+
+ADR 0003's one new assumption — that `purge.jsdelivr.net` reliably invalidates
+the `release` branch manifest within the workflow's lifetime — is now measured
+rather than assumed.
+
+- **The purge works and is targeted.** A warm edge entry's `age` collapses from
+  314 s to 0 across the purge call and climbs 1 s/s from the purge instant; an
+  unpurged control file on the same branch, warmed identically in the same
+  interval, climbs 275 → 310 straight through and never resets. Eviction lands
+  within 7 s of the endpoint returning `finished`, and consistent with immediate.
+- **Without a purge nothing invalidates on its own.** Branch URLs carry
+  `s-maxage=43200` — a 12-hour edge lifetime — and the control showed no
+  revalidation over five minutes. The stale-manifest risk is real.
+- **The first attempt is recorded as proving nothing.** `build-16` read fresh
+  17 s after the release, but every fetch returned `x-cache: MISS, MISS` — a
+  cold edge returns current content with or without a purge, so that vantage
+  point cannot discriminate. Same failure mode as the Part D audit, one section
+  after writing it up; the ticket says so plainly rather than banking the
+  number.
+
+Not established, and blocking nothing: the end-to-end seconds from release to a
+browser that already held the old manifest seeing the new tag. That needs a warm
+client, which is the owner's browser. The eviction was the step in doubt.
+
+For the Architect: ADR 0003's assumption 3 can be marked verified. The ADR is
+unedited.

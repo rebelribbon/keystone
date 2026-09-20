@@ -254,21 +254,107 @@ The move to versioned `/exec` deployments still stands on its own merits
 reason is unsupported. Whether to re-test `/dev` under controlled conditions is
 the Architect's call; nothing depends on the answer.
 
+### Part C — the purge measurement (ADR 0003's unverified assumption)
+
+The acceptance item, verbatim:
+
+> Purge timing recorded: measured seconds from release-workflow completion to
+> the new `tag` appearing at the manifest URL, with and without the purge call.
+> If purge is unreliable, that is stated plainly and Part C stops at the
+> finding.
+
+**Result: the purge is reliable. It evicts jsDelivr's warm cache for exactly the
+purged path, within seconds of the call returning, and nothing else on the same
+branch is touched.** Part C does not stop at a finding; the manifest lookup's
+freshness guarantee holds.
+
+#### The first attempt, and why it proved nothing
+
+`build-16` was the first release carrying the purge step (workflow run
+35527939646). Force-push to `release` completed at **18:05:52.75**; the purge
+step ran **18:05:53.81 → 18:05:54.49** and returned HTTP 200 with
+`status: "finished"`, `throttled: false`, `providers: {CF: true, FY: true}`; the
+job finished at 18:05:56. My fetch at **18:06:11** returned `"tag": "build-16"`
+— fresh within 17 s of the release completing.
+
+That observation does not establish that the purge did anything. Every URL I
+fetched came back `x-cache: MISS, MISS` — I was hitting a cold jsDelivr edge, so
+every request went to origin and returned current content **whether or not the
+purge had run**. A cold vantage point cannot distinguish a working purge from a
+missing one. My attempted control (an unpurged file on the same branch) was also
+fresh, but its prior cache state was unknown, so it was not a control either.
+
+This is Part D's failure mode again, one section after writing it up: the
+outside observation was taken, but not under controlled conditions.
+
+#### The measurement that does discriminate
+
+Content identity is irrelevant to the question. The claim under test is
+*"`purge.jsdelivr.net` evicts a warm edge entry"*, and that can be measured on
+the existing object by watching `age` reset — no release required.
+
+Method: warm the edge by fetching both URLs until they returned
+`x-cache: MISS, HIT` (an edge miss served by the Fastly shield) with `age`
+climbing 1 s/s; then purge **only** the manifest; then keep polling both.
+One variable changed. The control is `dist/server/Code.gs` on the same branch,
+warmed the same way, in the same interval, from the same client.
+
+| UTC | manifest (purged) | `Code.gs` (control) |
+| --- | --- | --- |
+| 18:11:09 | HIT, age 297 | HIT, age 231 |
+| 18:11:16 | HIT, age 304 | HIT, age 238 |
+| 18:11:26 | HIT, age 314 | — |
+| **18:11:41.076** | **purge returns `finished`** | *(not purged)* |
+| 18:11:53 | MISS, age 4 | HIT, age 275 |
+| 18:11:57 | **age 0** | — |
+| 18:12:06 | HIT, age 9 | HIT, age 288 |
+| 18:12:15 | HIT, age 18 | — |
+| 18:12:19 | HIT, age 22 | HIT, age 301 |
+| 18:12:28 | age 39 | HIT, age 310 |
+
+The purged path's age collapses from 314 to 0 across the purge and then climbs
+1 s/s from the purge instant. The control's age climbs straight through the same
+interval, 275 → 310, and never resets. Both shield POPs serving me (IAD and LGA)
+dropped the manifest; neither dropped the control.
+
+What this establishes:
+
+- **The purge works, and is targeted.** A warm entry is gone within seconds of
+  the endpoint returning `finished` — at most 7 s in this run, and consistent
+  with immediate. The unpurged sibling on the same branch is untouched, so the
+  reset is the purge and not a branch-wide or repo-wide event.
+- **Without a purge, nothing invalidates it on its own.** jsDelivr serves branch
+  URLs with `cache-control: public, max-age=604800, s-maxage=43200` — a 12-hour
+  edge lifetime — and the control's age climbed monotonically for over five
+  minutes with no revalidation. The stale-manifest risk ADR 0003 names is real,
+  not theoretical.
+- **`build-16` is consistent with the purge working** and, given the above, is
+  now the expected result rather than the evidence for it.
+
+What this does **not** establish, and why it no longer blocks anything: the
+end-to-end wall-clock seconds from release completion to a *browser that already
+held the old manifest* seeing the new tag. That number needs a client with a
+warm edge for this exact URL, which is Brad's browser, not this session. The
+eviction is the only step that was in doubt; once the entry is gone the next
+fetch is an origin fetch, which `build-16` timed at well under the 60 s
+acceptance bound. If the owner wants the end-to-end figure recorded anyway, load
+the page, then after the next release reload and read the `tagSource`/tag in the
+boot payload — but no decision waits on it.
+
+**For the Architect:** ADR 0003's assumption 3 can be marked verified, with this
+section as the evidence. I have not edited the ADR.
+
 ### Still open on this ticket
 
-The three live checks for Part C, all of which need the deployment and none of
+Two live checks for Part C, both of which need the deployment and neither of
 which will be ticked from a unit test:
 
 - the merge-to-visible-tag timing (should be inside 60 s);
-- the purge timing, with and without the purge call;
 - the dead-`asset_base_url` fallback showing the banner and naming its source.
 
-The second one is the one that matters: ADR 0003 calls the purge assumption
-unverified and says this ticket verifies it before anything depends on it. Until
-that measurement exists, the manifest lookup is shipped but its freshness
-guarantee is not proven. If purge turns out unreliable, ADR 0003's own fallback
-is the service-account Sheet write, which is a new ticket rather than an
-improvisation here.
+The purge measurement is done — see the section above. Neither remaining check
+gates anything: the first is a timing figure whose mechanism is now verified,
+the second exercises a path with unit coverage.
 
 Run them from the **personal** browser, or add the Workspace address as a Cloud
 test user first — which is now a documented step rather than a surprise.
