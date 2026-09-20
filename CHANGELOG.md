@@ -485,3 +485,50 @@ Three defects found by the work, worth keeping:
   The word that sets the number is "readability".
 - **The `?dev=sun` readout lagged the scene**, showing 00:10 while the sky was at
   21:00, because it painted from its own writes rather than from the store.
+
+## 009 — Channel resolution and tag source (Parts C and D)
+
+Parts A and B are the owner's to run and are not in this change; Part A's
+finding lands as `docs/decisions/0004-test-deployment-finding.md`.
+
+Added:
+- `docs/decisions/0003-tag-source-moves-off-the-github-api.md`, verbatim.
+- **Verify from outside** as a hard rule in `CLAUDE.md`: an acceptance check
+  must observe the outcome from outside the system that produced it.
+
+Changed (Part C, ADR 0003):
+- `src/server/Code.gs`: the newest-tag lookup reads
+  `{asset_base_url with @release}/dist/manifest.json` instead of calling
+  `api.github.com`. The GitHub endpoint's unauthenticated quota is 60/hour per
+  IP and shared across every script Google runs from the same egress, which we
+  exhausted twice without making 60 calls of our own. The CDN is already a hard
+  dependency for every bundle on the page, so this adds no new failure mode.
+  Same 60 s cache, same key.
+- `manifestUrl_` and `tagFromManifest_` (new, pure). The tag is **validated**
+  against `build-\d+` before use: it is substituted into every script `src` on
+  the page, so a malformed manifest has to degrade to `stable_tag` rather than
+  produce seven 404s and a blank screen.
+- `resolveRelease_` returns a `source`, and the boot payload carries
+  `tagSource`, so the degraded banner names what it fell back to.
+- `.github/workflows/release.yml`: purges the jsDelivr cache for the manifest
+  after the force-push to `release`. Branch URLs are not immutable, so without
+  it the manifest can serve the previous build's tag for hours. Best effort —
+  `continue-on-error` plus a workflow warning, since a failed purge means a late
+  tag, which the 60 s cache and the `stable_tag` fallback both survive, and it
+  is not worth failing a release that is already built and tagged.
+- `docs/SETUP.md`: the two tag-related troubleshooting entries now describe the
+  manifest lookup and tell the owner to open the manifest URL.
+
+A deliberate deviation from ADR 0003 §4, argued in the ticket Handoff: the
+GitHub Releases API is **not** kept as a third fallback inside `doGet`. If the
+manifest fetch failed because the CDN is unreachable, then resolving a tag is
+worthless — the bundles come from that same host. The fallback could only help
+in a case that cannot occur, while keeping a quota-limited call on the page-view
+path. `pickNewestBuildTags_` and its tests stay for the updater's tag picker, as
+the ADR requires.
+
+Tests:
+- 15 new, including a **behavioural** check that runs `doGet` and inspects every
+  outbound URL — a grep would pass on a call built from concatenated strings.
+- The boot payload's `tagSource` is asserted for all four paths: manifest,
+  `stable_tag`, stable channel, and an owner `?tag=` override.

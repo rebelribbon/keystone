@@ -554,8 +554,15 @@ The page names the missing `Settings` key. Add it and reload. Remember the
 5-minute settings cache.
 
 **A yellow banner about a build tag.**
-The GitHub Releases lookup failed, so the page fell back to `stable_tag`. The
-banner says why. The app still works; it is just not on the newest build.
+The release-manifest lookup failed, so the page fell back to `stable_tag`. The
+banner says why and names the source it used. The app still works; it is just
+not on the newest build.
+
+Since ADR 0003 the newest tag comes from
+`{asset_base_url with @release}/dist/manifest.json` on the CDN, not from the
+GitHub API. If the banner persists, open that URL in a browser: it should be
+JSON whose `tag` is the newest `build-*`. A 404 means the `release` branch or
+the purge step is the problem, not your Settings.
 
 **The loading screen stops with a red file.**
 That bundle did not load from jsDelivr at that tag. As the owner you get a
@@ -569,8 +576,11 @@ reload. The server then fetches the bundles and inlines them. This is slower, so
 only use it if `cdn` does not work.
 
 **Nothing changed after a new release.**
-The test URL looks up the newest `build-*` tag and caches it for 60 seconds.
-Wait a minute and reload. If the change was to server code, a release alone does
+The test channel looks up the newest `build-*` tag from the release manifest on
+the CDN and caches it for 60 seconds. Wait a minute and reload. If it is still
+stale after several minutes, the release workflow's jsDelivr purge step may have
+failed — check the workflow run for a warning, and open the manifest URL above
+to see which tag it is actually serving. If the change was to server code, a release alone does
 nothing — run *Update server code* (step 13).
 
 **"The Apps Script API answered 403."**

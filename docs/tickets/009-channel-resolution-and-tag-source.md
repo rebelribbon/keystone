@@ -102,3 +102,113 @@ Audit the existing acceptance history against this rule as part of this ticket a
 - [ ] No secrets, no `TODO` in `src/`, no `localStorage`.
 
 ## Handoff (Builder fills in)
+
+### Status
+
+**Parts C and D are done. Parts A and B are not started** — Part A is an
+owner-driven investigation and I have given the owner the collection sheet.
+`docs/decisions/0004-test-deployment-finding.md` does not exist yet and is the
+next thing written when the evidence arrives. Two acceptance items therefore
+remain open, and they are named at the end of this Handoff rather than quietly
+left unticked.
+
+### Part C — what changed
+
+The newest-tag lookup now reads `{asset_base_url with @release}/dist/manifest.json`
+on the CDN. `manifestUrl_` and `tagFromManifest_` are new and pure;
+`fetchBuildTags_` is gone from the page-view path.
+
+The tag is **validated** against `build-\d+` before anything uses it. That is not
+defensive padding: the string is substituted into every script `src` the page
+emits, so a manifest serving `"dev"` or an HTML error body would produce seven
+404s and a blank screen instead of a visible failure with a banner.
+
+`resolveRelease_` now returns a `source`, the boot payload carries `tagSource`,
+and the banner appends it — so a degraded page says *what it fell back to*
+rather than only that something went wrong.
+
+`release.yml` purges the jsDelivr cache for the manifest after the force-push,
+with `continue-on-error`. A failed purge means a late tag, which the 60 s cache
+and the `stable_tag` fallback both survive; failing a release that is already
+built and tagged over it would be worse than the problem.
+
+### A deliberate deviation from ADR 0003 §4
+
+**ADR 0003 §4 keeps the GitHub Releases API as a third fallback inside
+`doGet`. I have not implemented that, and the acceptance list agrees with me
+rather than with the ADR** — it requires that "`api.github.com` appears in no
+code path reachable from `doGet`". The two cannot both hold, so this is a real
+contradiction in the ticket and not a reading I can finesse.
+
+I went with the acceptance list, because the fallback cannot help:
+
+- It only fires when the manifest fetch has already failed.
+- The manifest is on the same host as every bundle the page loads.
+- So in every case where the GitHub fallback would run, the page cannot load its
+  bundles anyway. It would resolve a tag for JavaScript that will not arrive.
+
+The only scenario it covers is "the CDN serves `dist/client/*` but not
+`dist/manifest.json`", which is not a failure mode jsDelivr has. Against that,
+keeping it costs a quota-limited third-party call on the page-view path — the
+exact thing ADR 0003 exists to remove.
+
+`pickNewestBuildTags_` and its tests stay untouched, and the updater's tag
+picker still uses the GitHub API, as both the ADR and the ticket require.
+
+**For the Architect:** ADR 0003 §4 should be amended to drop the third fallback,
+or the acceptance item should be relaxed and I will add it back. I would rather
+be told I am wrong than have the two documents disagree in the repo.
+
+### Part D — the audit
+
+The rule is in `CLAUDE.md`. Here is every acceptance check in tickets 001–008
+that was satisfied by a self-report rather than an outside observation, or that
+was recorded as met against something other than what it named. Not fixed here,
+per the ticket.
+
+**Named by ticket 009 already, listed for completeness:**
+
+| Ticket | Check | What actually happened |
+|---|---|---|
+| 002 | "Opening the test URL as the owner shows the loading screen, then a cube" | Run against **stable**. `PHASE0_RESULTS.md` recorded the substitution afterwards, but the check as written was never met. |
+| 002 | "Merging a new PR produces `build-2`, and **the test URL** serves it within two minutes" | Same. This one would have caught the broken test channel in ticket 002. |
+| 002 | "Setting `stable_tag` to `build-1` makes stable serve `build-1` **while the test URL serves the newest tag**" | Same — the half that discriminates was never observable. |
+| 003 | "**The test deployment**, opened with `?c=test`, loads the newest tag while stable loads `stable_tag`" | Same. Third ticket in a row to carry an unmeetable check as met. |
+| 004 | "Immediately after that run, **the test URL** reflects a visible server-side change and the stable URL still shows the old one" | Taken from the updater's completion dialog, which reported `test=repointed`. I wrote that `PHASE0_RESULTS` row; the fingerprint digests I verified prove *which bytes were written*, not *which URL serves them*. |
+
+**Additional ones the ticket did not name:**
+
+| Ticket | Check | Why it is a self-report |
+|---|---|---|
+| 002 | "`?dev=gates` reports PASS for gates 1, 2 and 4" | `?dev=gates` is Keystone's own code grading Keystone. Gate 2 (texture) and gate 4 (IndexedDB) have no outside observer at all. Gate 1's timing is at least taken from the browser's clock, and the cube was screenshotted, so that one is half-covered. |
+| 002 | "Killing the GitHub Releases fetch makes the page fall back to `stable_tag` and show the degraded banner" | I can find no record of this being run live. It was unit-tested. **It is also now obsolete** — ADR 0003 replaced the fetch it describes, and this ticket's equivalent check (dead `asset_base_url`) is likewise still unrun. |
+| 003 | "`?dev=gate3` reports PASS with matching SHA-256 digests" | The harness computing the digests is the same code that moved the bytes. This is the exact case the rule names, and it is the one the ticket cites: gate 3 passed while the load path was quadratic. |
+| 003 | "Forcing a conflict … produces a `(conflict copy)` build" | The 003 Handoff lists it as optional ("if you want it"). No record of it running. The conflict path has never executed outside a unit test. |
+| 004 | "A backup JSON file appears in the Builds folder before each write" | Taken from the dialog's `backup:` line. Nobody has reported opening the Builds folder to see the file. |
+| 004 | "only the ten most recent are kept" | Recorded in the 004 Handoff as unverified live — one backup exists. Honest at the time, still unverified. |
+| 005 | "Cache hits/misses 70/0" and the per-chunk figures | Counted by our own client code and reported through our own panel. The wall-clock collapse from 518.9 s to 48.3 s is real and externally visible; the hit/miss split is not. |
+| 006 | Every acceptance item | **Ticket 006 was never implemented.** The Phase 0 review lists it as shipped and it is not in the repo. Its live checks — renaming the `Users` sheet, adding an email and timing the grant — have never run. This is the strongest instance of the pattern: a whole ticket recorded as done on the strength of a summary. |
+| 008 | "`renderCount` stops increasing" | `renderCount` is our own counter. It does detect the failure it exists to detect — a runaway loop increments it — so this is weaker than the others, but it is still our instrumentation reporting on itself. A true outside check is a Chrome trace or a frame-capture count. |
+| 008 | Everything | The deployed page was never opened; 008 was verified against a local file-served bundle. Gate 1's new figure on the deployment is unmeasured. |
+
+**The shape, stated once:** in every case the check named an outside observation
+and was settled with an inside one, and in every case the substitution happened
+because the inside one was available and the outside one was awkward. The rule
+in `CLAUDE.md` does not prevent that; what prevents it is the check being
+written so it cannot be satisfied any other way — "open the URL and screenshot
+the address bar" rather than "the test URL serves the newest tag".
+
+### Still open on this ticket
+
+- `docs/decisions/0004-test-deployment-finding.md` — needs Part A's evidence.
+- Whether Part B is taken — follows from Part A.
+- The live checks for Part C: the merge-to-visible-tag timing, the purge timing
+  with and without the purge call, and the dead-`asset_base_url` fallback with
+  its banner. All three need the deployment and all three are exactly the kind
+  of outside observation Part D is about, so none of them will be ticked from a
+  unit test.
+- `docs/SETUP.md`'s deployment topology and its `/dev` explanation are
+  **deliberately untouched.** That text attributes the test channel's failure to
+  `/dev` plus multi-account sign-in, which is ADR 0001's premise — the premise
+  this ticket says is falsified. Rewriting it before Part A's finding would mean
+  replacing one wrong explanation with another guess.

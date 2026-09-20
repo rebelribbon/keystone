@@ -36,6 +36,7 @@ function createServer(options = {}) {
   const logRows = [];
   const fetches = [];
   const dialogs = [];
+  const templates = [];
   const drive = { folderId: "FOLDER", files: [], trashed: [], toasts: [] };
   drive.folder = {
     createFile: (name, content, type) => {
@@ -174,6 +175,26 @@ function createServer(options = {}) {
       const output = { html, setWidth: () => output, setHeight: () => output };
       return output;
     },
+    // Enough of the templating surface for doGet to run end to end: the
+    // assigned fields are captured so a test can read the boot payload, and
+    // evaluate() returns the chainable output doGet expects.
+    createTemplateFromFile: (name) => {
+      const template = {
+        __file: name,
+        evaluate() {
+          const output = {
+            template,
+            setTitle: () => output,
+            addMetaTag: () => output,
+            setXFrameOptionsMode: () => output,
+          };
+          templates.push(template);
+          return output;
+        },
+      };
+      return template;
+    },
+    XFrameOptionsMode: { ALLOWALL: "ALLOWALL" },
   };
 
   vm.createContext(sandbox);
@@ -181,7 +202,7 @@ function createServer(options = {}) {
   vm.runInContext(CODE_SRC, sandbox, { filename: "Code.gs" });
   vm.runInContext(API_SRC, sandbox, { filename: "Api.gs" });
   vm.runInContext(UPDATER_SRC, sandbox, { filename: "Updater.gs" });
-  return { g: sandbox, store, logRows, fetches, cache, sheets, dialogs, drive };
+  return { g: sandbox, store, logRows, fetches, cache, sheets, dialogs, drive, templates };
 }
 
 /** Apps Script's FileIterator shape over a plain array. */
@@ -387,56 +408,177 @@ describe("applyTagOverride_", () => {
   });
 });
 
+const CDN_BASE = "https://cdn.jsdelivr.net/gh/rebelribbon/keystone@{tag}";
+const MANIFEST_URL = "https://cdn.jsdelivr.net/gh/rebelribbon/keystone@release/dist/manifest.json";
+
+/** A CDN_BASE that serves a release manifest, and 404s everything else. */
+function manifestServing(tag, { code = 200, body = null } = {}) {
+  return (url) => {
+    if (url === MANIFEST_URL) {
+      return { code, body: body === null ? JSON.stringify({ tag, commit: "abc", files: [] }) : body };
+    }
+    return { code: 404, body: "" };
+  };
+}
+
+describe("the tag source (ADR 0003)", () => {
+  it("builds the manifest URL from asset_base_url, not a second hardcoded host", () => {
+    const { g } = createServer();
+    expect(g.manifestUrl_(CDN_BASE)).toBe(MANIFEST_URL);
+    // Point the setting elsewhere and the lookup follows the bundles.
+    expect(g.manifestUrl_("https://example.test/x/keystone@{tag}/")).toBe(
+      "https://example.test/x/keystone@release/dist/manifest.json"
+    );
+  });
+
+  it("reads and validates the tag out of a manifest body", () => {
+    const { g } = createServer();
+    expect(g.tagFromManifest_(JSON.stringify({ tag: "build-15" }))).toBe("build-15");
+    expect(g.tagFromManifest_(JSON.stringify({ tag: " build-15 " }))).toBe("build-15");
+  });
+
+  it("rejects a manifest that would produce a broken bundle URL", () => {
+    // This string is substituted into every script src on the page, so a bad
+    // one is seven 404s and a blank screen rather than a visible failure.
+    const { g } = createServer();
+    for (const bad of ["dev", "", "release", "build-", "../etc", "build-1; rm", null]) {
+      expect(g.tagFromManifest_(JSON.stringify({ tag: bad })), String(bad)).toBe("");
+    }
+    expect(g.tagFromManifest_("not json")).toBe("");
+    expect(g.tagFromManifest_("")).toBe("");
+    expect(g.tagFromManifest_(JSON.stringify({}))).toBe("");
+  });
+
+  it("fetches the newest tag from the release manifest", () => {
+    const { g, fetches } = createServer({ fetchImpl: manifestServing("build-15") });
+    expect(g.fetchNewestTag_(CDN_BASE)).toBe("build-15");
+    expect(fetches[0].url).toBe(MANIFEST_URL);
+  });
+
+  it("caches it, so a second page view does not refetch", () => {
+    const { g, fetches } = createServer({ fetchImpl: manifestServing("build-15") });
+    g.fetchNewestTag_(CDN_BASE);
+    g.fetchNewestTag_(CDN_BASE);
+    expect(fetches.length).toBe(1);
+  });
+
+  it("discards a cached value that is not a build tag", () => {
+    const { g, store, fetches } = createServer({ fetchImpl: manifestServing("build-15") });
+    store.set("ks_tags", '["build-7"]');  // the shape ticket 002 cached
+    expect(g.fetchNewestTag_(CDN_BASE)).toBe("build-15");
+    expect(fetches.length).toBe(1);
+  });
+
+  it("returns nothing on a non-200, and does not cache it", () => {
+    const { g, store } = createServer({ fetchImpl: manifestServing("build-15", { code: 503 }) });
+    expect(g.fetchNewestTag_(CDN_BASE)).toBe("");
+    expect(store.has("ks_tags")).toBe(false);
+  });
+
+  it("returns nothing on a manifest that is not JSON", () => {
+    const { g } = createServer({ fetchImpl: manifestServing("build-15", { body: "<html>502</html>" }) });
+    expect(g.fetchNewestTag_(CDN_BASE)).toBe("");
+  });
+});
+
 describe("resolveRelease_", () => {
-  it("test channel serves the newest build tag and keeps the previous one", () => {
-    const { g } = createServer({
-      fetchImpl: () => ({ code: 200, body: releases("build-7", "build-6", "v1") }),
-    });
-    const r = g.resolveRelease_("test", { github_repo: "rebelribbon/keystone", stable_tag: "build-1" });
-    expect(r.tag).toBe("build-7");
-    expect(r.previousTag).toBe("build-6");
+  it("test channel serves the tag from the release manifest", () => {
+    const { g } = createServer({ fetchImpl: manifestServing("build-15") });
+    const r = g.resolveRelease_("test", { asset_base_url: CDN_BASE, stable_tag: "build-1" });
+    expect(r.tag).toBe("build-15");
     expect(r.degraded).toBe(false);
+    expect(r.source).toBe("manifest");
     expect(r.error).toBe("");
   });
 
-  it("falls back to stable_tag with a degraded flag when the GitHub fetch fails", () => {
+  it("falls back to stable_tag with a degraded flag when the manifest 404s", () => {
     const { g } = createServer({ fetchImpl: () => ({ code: 404, body: "Not Found" }) });
-    const r = g.resolveRelease_("test", { github_repo: "rebelribbon/nope", stable_tag: "build-1" });
+    const r = g.resolveRelease_("test", { asset_base_url: CDN_BASE, stable_tag: "build-1" });
     expect(r.tag).toBe("build-1");
     expect(r.degraded).toBe(true);
-    expect(r.degradedReason).toContain("build-*");
+    expect(r.source).toBe("stable_tag");
+    // The reason names the URL that failed, so the banner is actionable.
+    expect(r.degradedReason).toContain(MANIFEST_URL);
+    expect(r.degradedReason).toContain("build-1");
     expect(r.error).toBe("");
   });
 
-  it("falls back with a degraded flag when UrlFetchApp throws", () => {
+  it("falls back when the CDN_BASE host is dead and UrlFetchApp throws", () => {
     const { g } = createServer({ fetchImpl: () => new Error("DNS failure") });
-    const r = g.resolveRelease_("test", { github_repo: "rebelribbon/keystone", stable_tag: "build-1" });
+    const r = g.resolveRelease_("test", { asset_base_url: CDN_BASE, stable_tag: "build-1" });
     expect(r.tag).toBe("build-1");
     expect(r.degraded).toBe(true);
+    expect(r.source).toBe("stable_tag");
     expect(r.degradedReason).toContain("DNS failure");
   });
 
   it("errors rather than rendering a broken URL when nothing resolves", () => {
     const { g } = createServer({ fetchImpl: () => ({ code: 500, body: "" }) });
-    const r = g.resolveRelease_("test", { github_repo: "rebelribbon/keystone" });
+    const r = g.resolveRelease_("test", { asset_base_url: CDN_BASE });
     expect(r.tag).toBe("");
+    expect(r.source).toBe("none");
     expect(r.error).toContain("stable_tag");
   });
 
-  it("stable channel reads stable_tag, and errors when it is missing", () => {
-    const { g } = createServer();
-    expect(g.resolveRelease_("stable", { stable_tag: "build-1" }).tag).toBe("build-1");
+  it("stable channel reads stable_tag and never fetches at all", () => {
+    const { g, fetches } = createServer({ fetchImpl: manifestServing("build-15") });
+    const r = g.resolveRelease_("stable", { asset_base_url: CDN_BASE, stable_tag: "build-1" });
+    expect(r.tag).toBe("build-1");
+    expect(r.source).toBe("stable_tag");
+    expect(fetches.length).toBe(0);
     expect(g.resolveRelease_("stable", {}).error).toContain("stable_tag");
   });
 
-  it("caches the tag lookup so a second call does not refetch", () => {
-    const { g, fetches } = createServer({
-      fetchImpl: () => ({ code: 200, body: releases("build-7", "build-6") }),
-    });
-    const settings = { github_repo: "rebelribbon/keystone", stable_tag: "build-1" };
+  it("caches the lookup so a second call does not refetch", () => {
+    const { g, fetches } = createServer({ fetchImpl: manifestServing("build-15") });
+    const settings = { asset_base_url: CDN_BASE, stable_tag: "build-1" };
     g.resolveRelease_("test", settings);
     g.resolveRelease_("test", settings);
     expect(fetches.length).toBe(1);
+  });
+});
+
+describe("api.github.com is unreachable from doGet (ADR 0003)", () => {
+  /** Every URL doGet fetches, on the test channel with everything working. */
+  function urlsFetchedByDoGet(overrides = {}) {
+    const ctx = createServer({
+      email: "owner@example.com",
+      usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]],
+      settingsRows: [
+        SETTINGS_HEADER,
+        ["asset_base_url", CDN_BASE],
+        ["stable_tag", "build-1"],
+        ["github_repo", "rebelribbon/keystone"],
+      ],
+      fetchImpl: manifestServing("build-15"),
+      ...overrides,
+    });
+    ctx.g.doGet({ parameter: { c: "test" } });
+    return ctx.fetches.map((f) => f.url);
+  }
+
+  it("fetches the manifest and nothing from GitHub", () => {
+    // Behavioural, not a grep: doGet actually runs and every outbound URL is
+    // inspected. A grep would pass on a call built from concatenated strings.
+    const urls = urlsFetchedByDoGet();
+    expect(urls).toContain(MANIFEST_URL);
+    for (const url of urls) expect(url).not.toContain("api.github.com");
+  });
+
+  it("still avoids GitHub on the degraded path", () => {
+    // The fallback that matters: when the manifest is unreachable there is no
+    // second lookup to reach for. ADR 0003 keeps the GitHub API for the
+    // updater's tag picker only, which no page view touches.
+    const urls = urlsFetchedByDoGet({ fetchImpl: () => ({ code: 500, body: "" }) });
+    for (const url of urls) expect(url).not.toContain("api.github.com");
+  });
+
+  it("leaves the GitHub call in the updater, where the quota is not a problem", () => {
+    const code = readFileSync(join(root, "src/server/Code.gs"), "utf8");
+    const updater = readFileSync(join(root, "src/server/Updater.gs"), "utf8");
+    // Code.gs may mention it in a comment; it must not call it.
+    expect(code).not.toMatch(/UrlFetchApp\.fetch\(\s*\n?\s*['"`]https:\/\/api\.github\.com/);
+    expect(updater).toContain("https://api.github.com/repos/");
   });
 });
 
@@ -1694,5 +1836,58 @@ describe("ksUpdaterDiagnoseAccess", () => {
     ).toEqual(["drive", "spreadsheets"]);
     expect(g.parseGrantedScopes_("not json")).toEqual([]);
     expect(g.parseGrantedScopes_(JSON.stringify({}))).toEqual([]);
+  });
+});
+
+describe("the boot payload names its tag source (ADR 0003)", () => {
+  function boot(settingsRows, fetchImpl, params = { c: "test" }) {
+    const ctx = createServer({
+      email: "owner@example.com",
+      usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]],
+      settingsRows,
+      fetchImpl,
+    });
+    ctx.g.doGet({ parameter: params });
+    return JSON.parse(ctx.templates[0].bootJson);
+  }
+
+  const SETTINGS = [
+    SETTINGS_HEADER,
+    ["asset_base_url", "https://cdn.jsdelivr.net/gh/rebelribbon/keystone@{tag}"],
+    ["stable_tag", "build-1"],
+  ];
+  const MANIFEST = "https://cdn.jsdelivr.net/gh/rebelribbon/keystone@release/dist/manifest.json";
+  const serving = (tag) => (url) =>
+    url === MANIFEST ? { code: 200, body: JSON.stringify({ tag }) } : { code: 404, body: "" };
+
+  it("says manifest on the happy path, and serves that tag", () => {
+    const payload = boot(SETTINGS, serving("build-15"));
+    expect(payload.tag).toBe("build-15");
+    expect(payload.tagSource).toBe("manifest");
+    expect(payload.degraded).toBe(false);
+    // The tag really does drive the bundle URLs the page will load.
+    expect(payload.base).toContain("@build-15");
+  });
+
+  it("says stable_tag when the manifest host is dead, with the banner text", () => {
+    const payload = boot(SETTINGS, () => new Error("getaddrinfo ENOTFOUND"));
+    expect(payload.tag).toBe("build-1");
+    expect(payload.tagSource).toBe("stable_tag");
+    expect(payload.degraded).toBe(true);
+    expect(payload.degradedReason).toContain("stable_tag (build-1)");
+    expect(payload.base).toContain("@build-1");
+  });
+
+  it("says stable_tag on the stable channel, which never fetches", () => {
+    const payload = boot(SETTINGS, serving("build-15"), {});
+    expect(payload.tag).toBe("build-1");
+    expect(payload.tagSource).toBe("stable_tag");
+    expect(payload.degraded).toBe(false);
+  });
+
+  it("says tag_override when the owner pins one with ?tag=", () => {
+    const payload = boot(SETTINGS, serving("build-15"), { c: "test", tag: "build-9" });
+    expect(payload.tag).toBe("build-9");
+    expect(payload.tagSource).toBe("tag_override");
   });
 });

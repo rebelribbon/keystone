@@ -145,7 +145,11 @@
           },
           start: function () {
             render();
-            if (boot.degraded && boot.degradedReason) showBanner(boot.degradedReason);
+            if (boot.degraded && boot.degradedReason) {
+              // Name the source, so a degraded page says what it fell back to
+              // rather than only that something went wrong (ADR 0003).
+              showBanner(boot.degradedReason + ' Tag source: ' + (boot.tagSource || 'unknown') + '.');
+            }
           },
           boot: function () {
             if (failed) return;

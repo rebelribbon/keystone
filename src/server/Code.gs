@@ -13,6 +13,9 @@
 
 var KS_DEFAULT_ASSET_BASE_URL = 'https://cdn.jsdelivr.net/gh/rebelribbon/keystone@{tag}';
 var KS_TAGS_CACHE_KEY = 'ks_tags';
+
+/** The branch the release workflow force-pushes the built tree to (ADR 0003). */
+var KS_RELEASE_BRANCH = 'release';
 var KS_TAGS_CACHE_TTL_SECONDS = 60;
 var KS_BUNDLE_CACHE_TTL_SECONDS = 21600;
 var KS_BUNDLE_CHUNK_CHARS = 90000;
@@ -142,6 +145,7 @@ function applyTagOverride_(release, paramTag, role) {
     previousTag: release.previousTag === requested ? '' : release.previousTag,
     degraded: release.degraded,
     degradedReason: release.degradedReason,
+    source: 'tag_override',
     error: ''
   };
 }
@@ -208,35 +212,76 @@ function toSafeJson_(value) {
  * ---------------------------------------------------------------------- */
 
 /**
- * Newest two `build-*` tags from the GitHub Releases API, cached 60 s.
- * Returns [] on any failure; the caller decides how to degrade.
- * @param {string} githubRepo
- * @return {!Array<string>}
+ * Pure. The release manifest URL for a CDN base (ADR 0003).
+ *
+ * Built from `asset_base_url` with the literal tag `release` rather than from a
+ * second hardcoded host, so pointing the setting somewhere else moves the tag
+ * lookup with the bundles instead of leaving it behind. The release workflow
+ * force-pushes the built tree to that branch, so this file is always the newest
+ * build's own manifest.
+ *
+ * Note for the §2.3 private-repo migration: that path serves bundles from
+ * `/builds/{tag}/`, which has no `release` branch. Moving there means giving
+ * this its own setting, and it is called out here so the migration trips over
+ * it rather than shipping a silently dead lookup.
+ * @param {string} assetBaseUrl
+ * @return {string}
  */
-function fetchBuildTags_(githubRepo) {
+function manifestUrl_(assetBaseUrl) {
+  return buildBaseUrl_(assetBaseUrl, KS_RELEASE_BRANCH) + '/dist/manifest.json';
+}
+
+/**
+ * Pure. The `tag` field of a `dist/manifest.json` body, or '' if it is not
+ * a usable `build-*` tag.
+ *
+ * Validated rather than trusted: this string is substituted into every bundle
+ * URL the page loads, so a malformed manifest must degrade to `stable_tag`
+ * instead of producing seven 404s and a blank screen.
+ * @param {string} body
+ * @return {string}
+ */
+function tagFromManifest_(body) {
+  var parsed;
+  try {
+    parsed = JSON.parse(String(body == null ? '' : body));
+  } catch (err) {
+    return '';
+  }
+  var tag = String((parsed && parsed.tag) == null ? '' : parsed.tag).trim();
+  return /^build-\d+$/.test(tag) ? tag : '';
+}
+
+/**
+ * The newest `build-*` tag, from the release manifest on the CDN (ADR 0003).
+ *
+ * Replaces the `api.github.com` lookup, whose unauthenticated quota is 60/hour
+ * per IP and shared across every script Google runs from the same egress — a
+ * limit we exhausted twice without making 60 calls of our own. The CDN is
+ * already a hard dependency for every bundle on the page, so this adds no new
+ * failure mode.
+ *
+ * Cached 60 s under the same key as before. Returns '' on any failure and lets
+ * the caller degrade.
+ * @param {string} assetBaseUrl
+ * @return {string}
+ */
+function fetchNewestTag_(assetBaseUrl) {
   var cache = CacheService.getScriptCache();
   var hit = cache.get(KS_TAGS_CACHE_KEY);
   if (hit) {
-    try {
-      var cached = JSON.parse(hit);
-      if (cached && cached.length) return cached;
-    } catch (err) {
-      cache.remove(KS_TAGS_CACHE_KEY);
-    }
+    var cachedTag = String(hit).trim();
+    if (/^build-\d+$/.test(cachedTag)) return cachedTag;
+    cache.remove(KS_TAGS_CACHE_KEY);
   }
 
-  var repo = String(githubRepo == null ? '' : githubRepo).trim();
-  if (!repo) return [];
+  var url = manifestUrl_(assetBaseUrl);
+  var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) return '';
 
-  var response = UrlFetchApp.fetch(
-    'https://api.github.com/repos/' + encodeURI(repo) + '/releases?per_page=30',
-    { muteHttpExceptions: true, headers: { Accept: 'application/vnd.github+json' } }
-  );
-  if (response.getResponseCode() !== 200) return [];
-
-  var tags = pickNewestBuildTags_(response.getContentText());
-  if (tags.length) cache.put(KS_TAGS_CACHE_KEY, JSON.stringify(tags), KS_TAGS_CACHE_TTL_SECONDS);
-  return tags;
+  var tag = tagFromManifest_(response.getContentText());
+  if (tag) cache.put(KS_TAGS_CACHE_KEY, tag, KS_TAGS_CACHE_TTL_SECONDS);
+  return tag;
 }
 
 /**
@@ -256,36 +301,44 @@ function resolveRelease_(channel, settings) {
   if (channel === 'stable') {
     if (!stableTag) {
       return {
-        tag: '', previousTag: '', degraded: false, degradedReason: '',
+        tag: '', previousTag: '', degraded: false, degradedReason: '', source: 'none',
         error: 'The Settings key "stable_tag" is missing or empty, so the stable deployment has nothing to load.'
       };
     }
-    return { tag: stableTag, previousTag: '', degraded: false, degradedReason: '', error: '' };
+    return {
+      tag: stableTag, previousTag: '', degraded: false, degradedReason: '',
+      source: 'stable_tag', error: ''
+    };
   }
 
-  var tags = [];
+  var newest = '';
   var reason = '';
   try {
-    tags = fetchBuildTags_(config['github_repo']);
-    if (!tags.length) {
-      reason = 'No build-* release was found for "' + (config['github_repo'] || '(github_repo is unset)') + '".';
+    newest = fetchNewestTag_(config['asset_base_url']);
+    if (!newest) {
+      reason = 'The release manifest at ' + manifestUrl_(config['asset_base_url']) +
+        ' did not return a usable build-* tag.';
     }
   } catch (err) {
-    reason = 'The GitHub Releases request failed: ' + err + '.';
+    reason = 'The release manifest request failed: ' + err + '.';
   }
 
-  if (tags.length) {
-    return { tag: tags[0], previousTag: tags.length > 1 ? tags[1] : '', degraded: false, degradedReason: '', error: '' };
+  if (newest) {
+    return {
+      tag: newest, previousTag: '', degraded: false, degradedReason: '',
+      source: 'manifest', error: ''
+    };
   }
   if (!stableTag) {
     return {
-      tag: '', previousTag: '', degraded: true, degradedReason: reason,
+      tag: '', previousTag: '', degraded: true, degradedReason: reason, source: 'none',
       error: reason + ' The Settings key "stable_tag" is also missing or empty, so there is no tag to fall back to.'
     };
   }
   return {
     tag: stableTag, previousTag: '', degraded: true,
     degradedReason: reason + ' Falling back to stable_tag (' + stableTag + ').',
+    source: 'stable_tag',
     error: ''
   };
 }
@@ -350,6 +403,10 @@ function doGet(e) {
     base: base,
     degraded: !!release.degraded,
     degradedReason: release.degradedReason,
+    // Which source produced the tag (ADR 0003): manifest, stable_tag,
+    // tag_override or none. The banner names it, so a degraded page says what
+    // it fell back to rather than only that something went wrong.
+    tagSource: release.source || 'unknown',
     loaderMode: loaderMode,
     devGates: devGates,
     // The raw ?dev= value, owner-only. Ticket 008 added ?dev=sun; passing the
