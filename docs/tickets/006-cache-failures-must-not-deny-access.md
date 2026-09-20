@@ -147,17 +147,57 @@ described shape, so the fix below is the one the ticket specifies.
 - `AUTH_UNAVAILABLE` is retried once after `RETRY_DELAY_MS` (1500 ms).
   `ACCESS_DENIED` and every other structured error are surfaced without a retry.
 
-### One judgement call worth flagging
+### One judgement call worth flagging: "swallow cache errors" is not a uniform rule
 
-Requirement 1 says the helpers never propagate, and requirement 4's "the request
-still completes successfully" is written about the auth path. Applied literally
-to the **upload** cache, a swallowed `put` would turn a failed save into a
-reported success that only falls over at commit with `CHUNK_MISSING`. The upload
-cache is the store for a save in progress (SPEC §14.2), not an optimization over
-one, so `api_beginSave` and `api_saveChunk` check `cachePut_`'s return and raise
-`CACHE_WRITE_FAILED`. The helpers still never throw; the caller decides. The
-download cache (ticket 005) and the settings, users, tag, and bundle caches all
-degrade silently, as specified.
+The helpers never propagate — that part **is** uniform, and requirement 1 is
+implemented exactly as written. What is not uniform is what a caller does with a
+`false` return, and that distinction has to survive this ticket, because
+"swallow cache errors" is the sentence someone will remember and apply
+everywhere.
+
+**The rule, stated so it can be applied to the next cache:**
+
+> Ask what the cache holds. If losing the value costs *time*, swallow the
+> failure and take the slow path. If losing the value costs *data*, report it.
+
+Keystone's script cache is used for both, and the two are easy to confuse
+because they run through the same five helpers:
+
+| Cache | What it holds | The slow path when it fails | Therefore |
+|---|---|---|---|
+| Users answers, `Settings`, tag, bundle chunks | a copy of something the Sheet or the CDN still has | re-read the source | swallow — it is slower, never wrong |
+| Download chunks (ticket 005) | a copy of the Drive file's bytes | re-read and re-encode the file | swallow — ticket 005 proves the two paths byte-identical |
+| **Upload staging** (`api_beginSave`, `api_saveChunk`) | **the only copy of the build being saved** | **there isn't one** | **report** |
+
+The upload cache is the store for a save in progress (SPEC §14.2: "chunks stored
+in `CacheService`, 6 h TTL"), not an optimization over a store. Nothing else has
+those bytes: the client has already handed them over, the Drive file is not
+written until `api_commitSave` assembles them. A swallowed `put` there does not
+make the save slow, it makes the save **silently incomplete** — `api_saveChunk`
+answers `{ok: true}`, the client reports a successful save, and the failure
+surfaces minutes later as `CHUNK_MISSING` at commit, pointing at the wrong
+chunk, for a reason that is no longer on screen. That is the same defect shape
+this ticket exists to remove, just moved from the auth path to the save path:
+the system reporting something that is not true.
+
+So `api_beginSave` and `api_saveChunk` check `cachePut_`'s return and raise
+`CACHE_WRITE_FAILED`. The helper still does not throw; the *caller* decides,
+which is the whole reason the helpers return a boolean instead of nothing.
+
+Two things this does **not** license, for whoever reads it next:
+
+- It is not permission to re-raise cache errors on a read path. Every read in
+  `src/server/` still treats a failure as a miss, including the upload reads
+  (`api_commitSave`'s meta and chunk `get`s), where a miss already has the right
+  answer: `UPLOAD_EXPIRED` and "start the save again" are what the person must
+  do either way, because the staged bytes are gone.
+- It is not a new error code to reach for generally. `CACHE_WRITE_FAILED` means
+  "this write was the only copy and it did not land." If a future cache write is
+  a copy of something durable, it goes back to the swallowing column.
+
+Requirement 4's "the request still completes successfully" is satisfied where it
+was written — the auth path — and the tests assert it there: a throwing `put`
+leaves `getUserRole_`, `api_whoami`, and `getSettings_` all working.
 
 ### How the owner verifies it on the test URL
 

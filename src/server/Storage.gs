@@ -78,8 +78,15 @@ function findRole_(rows, email) {
  * answer, and in the auth path "no role" is a different answer — it is the one
  * that tells a listed user they are not on the list.
  *
- * None of these throw. A read failure is a miss; a write failure is a false
- * return the caller may ignore.
+ * None of these throw. A read failure is a miss; a write failure is a `false`
+ * return — and the caller, not the helper, decides what that is worth. Ask what
+ * the key holds: if losing it costs time, ignore the `false` and take the slow
+ * path (Settings, Users, tags, bundles, download chunks — the Sheet, the CDN or
+ * Drive still has the value). If losing it costs data, report it. The upload
+ * staging cache is the only one in that second column: it is the store for a
+ * save in progress (SPEC §14.2), nothing else holds those bytes, so Api.gs
+ * checks its writes and raises CACHE_WRITE_FAILED rather than reporting a save
+ * that is silently incomplete. Ticket 006's Handoff argues it in full.
  * ---------------------------------------------------------------------- */
 
 /**
