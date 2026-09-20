@@ -97,3 +97,132 @@ Writing the runner now, with no migrations in it, means the first real migration
 - [ ] No `TODO` in `src/`, no `localStorage`, no secrets.
 
 ## Handoff (Builder fills in)
+
+### What changed
+
+Five new modules and the wiring. All pure logic, no deployed behavior change.
+
+Files: `src/client/core/document.js`, `core/store.js`, `core/commands.js`,
+`core/events.js`, `core/build-commands.js` (new),
+`src/client/persistence/migrations.js` (new), `src/client/main.js`,
+`tests/core-document.test.js`, `tests/core-store.test.js`,
+`tests/core-commands.test.js`, `tests/core-events.test.js`,
+`tests/migrations.test.js`, `tests/source-hygiene.test.js` (all new),
+`CHANGELOG.md`, one screenshot.
+
+**328 tests across 13 files**, up from 183. `npm run build` passes.
+
+### Verified in the built bundle, not just in vitest
+
+The minified `dist/client/engine.js` loaded in headless Chromium with the real
+loader shell:
+
+| Check | Result |
+|---|---|
+| Phase 0 cube still renders | yes, `#ks-root canvas` present, no page errors |
+| `KS.store` / `commands` / `events` / `document` | all four present |
+| Document schema, levels, frozen | 1, 1 level, frozen |
+| `KS.store.setIn` outside a command | throws |
+| `SetLevelProps` do → 4.5, undo → 3.05, document restored | byte-identical |
+| `KS.events.emit("tool:change")` (typo) | throws |
+
+Screenshot: `screenshots/007-core-cube.png`. Worth doing because §0.3's
+enforcement depends on a `Symbol` surviving esbuild's minifier, and a unit test
+against source would not have told us.
+
+### A defect the ticket did not anticipate: the store had no delete
+
+The undo-symmetry run failed at command 34. Undoing a command that had *created*
+an entity wrote `undefined` back, which leaves the key present in memory and
+drops it through `JSON.stringify` — so the document a geometry builder iterates
+and the document that reaches Drive would disagree, silently.
+
+That is not a test-only problem. §7 requires `DeleteWalls`, `DeleteRoof`,
+`DeleteOpening` and `DeleteObjects`, and the undo of every `Add*` is a delete.
+A store that can only set cannot express any of them.
+
+Added, beyond the ticket:
+
+- **`store.deleteIn(path)`** — immutable removal with the same structural
+  sharing, dirty-category derivation and command gating as `setIn`. A no-op when
+  the key is already gone. Refuses to delete an array index, because in §6 an
+  array is data (a polygon, a lot size) and removing an index silently
+  renumbers what follows.
+- **`setIn(path, undefined)` now throws**, naming `deleteIn`. This is the
+  guardrail rather than the feature: it makes the memory/JSON divergence
+  impossible to reintroduce by accident.
+- `updateIn` deletes when its updater returns `undefined`.
+- `null` stays a value, not an absence — §6 uses it for "unset but present" (an
+  inherited wall height, an untinted material), and a test pins the distinction.
+
+The second-order lesson is in the test helper's comment: `setIn` creates
+intermediate objects on the way down, so undoing a write to
+`rooms.r_1.name` has to remove `r_1`, not just `name`. Every real `Add*`
+command carries that obligation.
+
+### Deviations and judgement calls
+
+- **Non-undoable commands are flagged `undoable: false`, not detected by a
+  missing `undo`.** §7's typedef has `undo` as required and marks
+  `SetEnvironment` "not undoable, but recorded", so something had to give.
+  An absent `undo` is indistinguishable from a forgotten one; the bus now
+  *throws* on a command with neither, which turns a whole class of silent
+  half-undo bugs into a startup error.
+- **`newId` mints 8 random characters, not the 6 in §6's example.** At six, a
+  10,000-ID build has roughly a 1-in-1,000 chance of a collision, which is too
+  high for identifiers that must survive a save, a load, and a future merge.
+  Eight puts it near 1 in 4 million. Prefixes and alphabet are unchanged.
+- **The store's write window is a `Symbol` export.** `KS.store` is read-only in
+  practice for every tool, panel and content pack. Importing `store.js` inside
+  the bundle to get the symbol is still possible — this stops the accident, not
+  a determined author, and the comment says so rather than overclaiming.
+- **`categoryForPath` throws on an unmapped path** instead of emitting nothing.
+  The document shape is locked by §6, so an unmapped root is a typo or an
+  unannounced schema change. Every §6 field is mapped explicitly, including the
+  ones that are not categories: `paths`/`pools`/`fences`/`stairs` rebuild with
+  `objects`, `platforms`/`trim`/`foundation` with `levels`, `lot` with `terrain`.
+- **The event bus throws on an unknown name everywhere, not just in dev.** §4.1
+  asks for throw-in-dev and warn-in-prod, but the bundle has no dev/prod split,
+  so a "prod" branch would be dead code and guessing at the signal would disable
+  the check in exactly the build where a silent no-op costs most. `setStrict()`
+  exists and is tested; nothing calls it yet.
+- **`KS.store` opens over an empty §6 document** rather than over null, so no
+  later ticket has to special-case a missing document. `KS.boot` still creates
+  nothing, as the ticket requires; opening a saved build will go through
+  `store.replaceDocument`.
+- **`runMigrations` takes an optional `target`.** The real list is empty at
+  schema 1, so without it the loop could only be tested by a copy of itself in
+  the test file — which would pass while the shipped loop was broken. Production
+  always uses the default.
+- **The two commands live in `core/build-commands.js`.** SPEC §3's tree has no
+  `commands/` directory and `core/commands.js` is the bus, so a sibling under
+  `core/` was the option that invents no new directory.
+
+### One acceptance item could not be met as written
+
+> Undo symmetry: **for both commands** … `do` then `undo` returns a document
+> deep-equal to the original.
+
+`SetEnvironment` is "not undoable, but recorded" (§7), so do-then-undo
+deliberately does *not* restore the original — that is its specified behavior,
+not a bug. Rather than fudge it, there is a test named
+*"SetEnvironment is asymmetric on purpose: recorded, never undone"* that asserts
+the environment stays changed and the document does **not** match.
+
+Symmetry itself is covered harder than asked: `SetLevelProps`, plus a
+**200-command randomized sequence** (deterministic seed, so a failure
+reproduces) over twelve paths, unwound one step at a time and checked against a
+snapshot at **every** intermediate state, then compared byte-for-byte with
+`serialize`. Checking only the end state would have hidden the `deleteIn`
+defect, which first showed up at step 34 and cancelled out later.
+
+### What the next ticket inherits
+
+- `store.replaceDocument(doc)` is how the loader will open a saved build; it
+  emits every category dirty and does not touch the command stacks, so the
+  caller pairs it with `commands.clear()`.
+- Commands capture their undo state in `do`, not at construction. That is what
+  makes redo correct after other edits, and the pattern every §7 command should
+  follow.
+- `history()` returns `{ label, type, undoable }` newest first, ready for the
+  §13.2 panel. Nothing renders it yet.
