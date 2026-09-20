@@ -562,3 +562,64 @@ work browser and every stable-URL attempt in the personal one. The comparison
 changed two variables at once. "No conclusion" prompts another look; "wrong
 conclusion" closes the question, and this one stayed closed for three tickets
 and two ADRs. The Handoff proposes the rule addition that would have caught it.
+
+## 006 — Cache failures must not deny access
+
+A transient script-cache failure locked every user out of the web app and told
+them the one thing that was not true: that they were not on the access list.
+Reproduced first, in the eval sandbox, with a cache whose `get` throws — a
+listed owner got `{ code: "ACCESS_DENIED" }` from `api_whoami`, the access
+screen from `doGet`, and a `Log` row reading `reason=not_listed`.
+
+Changed:
+- `src/server/Storage.gs`: five cache helpers — `cacheGet_`, `cacheGetAll_`,
+  `cachePut_`, `cachePutAll_`, `cacheRemove_` — over a single `ksCache_`
+  accessor. None of them throws: a read failure is a miss, a write failure is a
+  `false` return. `CacheService` is now named exactly once in all of
+  `src/server/`, and a static test holds that line.
+- `getUserRole_` returns a tri-state — `{status:'ok', role}`,
+  `{status:'denied'}`, `{status:'unavailable', reason}` — instead of a role or
+  null. The cache is never the source of an answer on its own: a miss or a cache
+  error falls through to the Sheet, and only a successful Sheet read produces
+  `ok` or `denied`.
+- `readUsersRows_` (new) throws when the `Users` tab is missing, where
+  `readSheetRows_` answers `[]`. An empty array is indistinguishable from a tab
+  full of other people's rows, which is how a missing tab read as "you are not
+  on the list".
+- Per-email authorization answers replace the cached `Users` rows: a grant is
+  cached 300 s, a **denial 30 s**. The old 300 s negative TTL meant adding
+  someone to `Users` appeared not to work for five minutes. An `unavailable` is
+  never cached at all.
+- `decideAccess_` takes the tri-state and returns the same three outcomes.
+  Anything that is not a tri-state — a bare role string, a leftover null —
+  resolves to `unavailable`, not to a denial: a caller that hands over no answer
+  has not established that there isn't one.
+- `doGet` renders a new service-unavailable screen for `unavailable` (§13.1
+  tokens, self-contained, no mention of the access list) and writes an
+  `auth_unavailable` `Log` row. `denied` keeps its screen and its
+  `access_denied` row unchanged.
+- Every `api_*` function returns `{ code: 'AUTH_UNAVAILABLE' }`, distinct from
+  `ACCESS_DENIED`, via `accessError_`. The updater's owner gate uses the same
+  mapping.
+- `src/client/persistence/transport.js`: `AUTH_UNAVAILABLE` is retried once
+  after a 1.5 s delay. `ACCESS_DENIED` and every other structured error are
+  surfaced immediately, as before — a denial is an answer, not a blip.
+- Ticket 005's download chunk cache and ticket 003's upload staging cache now go
+  through the shared helpers; `putCacheBatch_` is gone. One deliberate
+  difference: the upload cache is the *store* for a save in progress, not an
+  optimization over one, so `api_beginSave` and `api_saveChunk` report a refused
+  write as `CACHE_WRITE_FAILED` rather than returning a success that fails at
+  commit with missing chunks.
+- `docs/SETUP.md`: the new screen as its own troubleshooting entry, and the 30 s
+  denial TTL noted on the access-screen entry.
+
+Tests: 26 new in `tests/server-logic.test.js` (cache throws with a readable tab
+both ways, an unreadable tab, a missing tab, TTLs by outcome, nothing cached for
+`unavailable`, the two `doGet` screens and their `Log` rows, every `api_*`
+answering `AUTH_UNAVAILABLE`, and the static no-raw-`CacheService` check) and a
+new `tests/transport.test.js` for the retry policy. The sandbox cache fake now
+records TTLs, and its `HtmlService` fake carries the chained calls the
+standalone screens make, so a screen is asserted by running `doGet`.
+
+No hardcoded owner email and no bypass path: the fix is the message and the
+retry, not an escape hatch (ticket §5).

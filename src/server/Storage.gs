@@ -10,8 +10,21 @@
  */
 
 var KS_SETTINGS_CACHE_KEY = 'ks_settings';
-var KS_USERS_CACHE_KEY = 'ks_users';
+var KS_USER_CACHE_PREFIX = 'ks_user_';
 var KS_SHEET_CACHE_TTL_SECONDS = 300;
+
+/**
+ * How long an authorization answer stays cached, by outcome (ticket 006 §4).
+ *
+ * A granted answer is stable and worth 300 s. A denial is not: the owner adds a
+ * row to `Users` precisely because someone was denied, and a five-minute
+ * negative TTL means the fix appears not to work. Thirty seconds keeps the
+ * Sheet read off the hot path without making the owner wait out a stale no.
+ */
+var KS_ROLE_OK_TTL_SECONDS = 300;
+var KS_ROLE_DENIED_TTL_SECONDS = 30;
+
+var KS_USERS_TAB = 'Users';
 
 var KS_VALID_ROLES = ['owner', 'editor', 'viewer'];
 
@@ -55,6 +68,128 @@ function findRole_(rows, email) {
   return null;
 }
 
+/* -------------------------------------------------------------------------
+ * Script cache (ticket 006)
+ *
+ * Every cache interaction in src/server/ goes through these five helpers, and
+ * `CacheService` is named exactly once, in ksCache_. A cache is an optimization:
+ * when it fails, the caller must fall back to the slow path that was always
+ * there. The one outcome a cache failure must never produce is a different
+ * answer, and in the auth path "no role" is a different answer — it is the one
+ * that tells a listed user they are not on the list.
+ *
+ * None of these throw. A read failure is a miss; a write failure is a `false`
+ * return — and the caller, not the helper, decides what that is worth. Ask what
+ * the key holds: if losing it costs time, ignore the `false` and take the slow
+ * path (Settings, Users, tags, bundles, download chunks — the Sheet, the CDN or
+ * Drive still has the value). If losing it costs data, report it. The upload
+ * staging cache is the only one in that second column: it is the store for a
+ * save in progress (SPEC §14.2), nothing else holds those bytes, so Api.gs
+ * checks its writes and raises CACHE_WRITE_FAILED rather than reporting a save
+ * that is silently incomplete. Ticket 006's Handoff argues it in full.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The script cache, or null when even acquiring it fails.
+ * @return {?Object}
+ */
+function ksCache_() {
+  try {
+    return CacheService.getScriptCache();
+  } catch (err) {
+    console.error('ksCache_ could not acquire the script cache: ' + describeError_(err));
+    return null;
+  }
+}
+
+/**
+ * One cached value, or null on a miss or any thrown error.
+ * @param {string} key
+ * @return {?string}
+ */
+function cacheGet_(key) {
+  var cache = ksCache_();
+  if (!cache) return null;
+  try {
+    var value = cache.get(key);
+    return value === undefined ? null : value;
+  } catch (err) {
+    console.error('cacheGet_("' + key + '") threw, treating as a miss: ' + describeError_(err));
+    return null;
+  }
+}
+
+/**
+ * Several cached values at once. Returns a partial object rather than throwing,
+ * so a caller that needs every key finds a hole and takes its slow path.
+ * @param {!Array<string>} keys
+ * @return {!Object<string,string>}
+ */
+function cacheGetAll_(keys) {
+  var cache = ksCache_();
+  if (!cache) return {};
+  try {
+    return cache.getAll(keys) || {};
+  } catch (err) {
+    console.error('cacheGetAll_ threw, treating as a miss: ' + describeError_(err));
+    return {};
+  }
+}
+
+/**
+ * Write one value. Never propagates.
+ * @param {string} key
+ * @param {string} value
+ * @param {number} ttlSeconds
+ * @return {boolean} true when the write landed
+ */
+function cachePut_(key, value, ttlSeconds) {
+  var cache = ksCache_();
+  if (!cache) return false;
+  try {
+    cache.put(key, value, ttlSeconds);
+    return true;
+  } catch (err) {
+    console.error('cachePut_("' + key + '") failed: ' + describeError_(err));
+    return false;
+  }
+}
+
+/**
+ * Write several values in one call. Never propagates.
+ * @param {!Object<string,string>} obj
+ * @param {number} ttlSeconds
+ * @return {boolean} true when the write landed
+ */
+function cachePutAll_(obj, ttlSeconds) {
+  var cache = ksCache_();
+  if (!cache) return false;
+  try {
+    cache.putAll(obj, ttlSeconds);
+    return true;
+  } catch (err) {
+    console.error('cachePutAll_ failed: ' + describeError_(err));
+    return false;
+  }
+}
+
+/**
+ * Drop one key. Never propagates.
+ * @param {string} key
+ * @return {boolean} true when the removal landed
+ */
+function cacheRemove_(key) {
+  var cache = ksCache_();
+  if (!cache) return false;
+  try {
+    cache.remove(key);
+    return true;
+  } catch (err) {
+    console.error('cacheRemove_("' + key + '") failed: ' + describeError_(err));
+    return false;
+  }
+}
+
 /**
  * Read every populated row of a tab. Returns [] when the tab is missing.
  * @param {string} tabName
@@ -73,17 +208,16 @@ function readSheetRows_(tabName) {
  * @return {!Object<string,string>}
  */
 function getSettings_() {
-  var cache = CacheService.getScriptCache();
-  var hit = cache.get(KS_SETTINGS_CACHE_KEY);
+  var hit = cacheGet_(KS_SETTINGS_CACHE_KEY);
   if (hit) {
     try {
       return JSON.parse(hit);
     } catch (err) {
-      cache.remove(KS_SETTINGS_CACHE_KEY);
+      cacheRemove_(KS_SETTINGS_CACHE_KEY);
     }
   }
   var settings = parseSettingsRows_(readSheetRows_('Settings'));
-  cache.put(KS_SETTINGS_CACHE_KEY, JSON.stringify(settings), KS_SHEET_CACHE_TTL_SECONDS);
+  cachePut_(KS_SETTINGS_CACHE_KEY, JSON.stringify(settings), KS_SHEET_CACHE_TTL_SECONDS);
   return settings;
 }
 
@@ -103,7 +237,7 @@ function getSetting_(key, fallback) {
 
 /** Drop the cached `Settings` object so the next read hits the Sheet. */
 function invalidateSettings_() {
-  CacheService.getScriptCache().remove(KS_SETTINGS_CACHE_KEY);
+  cacheRemove_(KS_SETTINGS_CACHE_KEY);
 }
 
 /**
@@ -140,27 +274,91 @@ function writeSetting_(key, value) {
 }
 
 /**
- * A user's role from the `Users` tab, or null when the account is not listed.
- * The rows are cached for 300 s, not the per-email answer.
+ * The cache key holding one account's authorization answer.
+ * @param {string} normalizedEmail already trimmed and lowercased
+ * @return {string}
+ */
+function userCacheKey_(normalizedEmail) {
+  return KS_USER_CACHE_PREFIX + normalizedEmail;
+}
+
+/**
+ * Every populated row of the `Users` tab. Throws when the tab cannot be read.
+ *
+ * Deliberately not `readSheetRows_`, which answers a missing tab with `[]`. An
+ * empty array is indistinguishable from a tab full of other people's rows, so
+ * routing the auth path through it turns "the Users tab is gone" into "you are
+ * not on the list" — the whole defect this ticket exists for.
+ * @return {!Array<Array<*>>}
+ */
+function readUsersRows_() {
+  var sheet = SpreadsheetApp.getActive().getSheetByName(KS_USERS_TAB);
+  if (!sheet) {
+    throw ksError_('USERS_TAB_MISSING', 'The Users tab is missing from the Keystone Index sheet.');
+  }
+  var range = sheet.getDataRange();
+  if (!range) {
+    throw ksError_('USERS_RANGE_MISSING', 'The Users tab returned no data range.');
+  }
+  return range.getValues() || [];
+}
+
+/**
+ * A user's authorization answer as a tri-state (ticket 006 §2).
+ *
+ *   { status: 'ok', role }            the tab was read and the email matched
+ *   { status: 'denied', reason }      the tab was read and nothing matched
+ *   { status: 'unavailable', reason } the tab could not be read at all
+ *
+ * The third is not an answer and callers must never render it as one. The cache
+ * is never the source of an answer on its own: a miss or a cache error falls
+ * through to the Sheet, and only a successful Sheet read produces `ok` or
+ * `denied`. Never throws.
  * @param {string} email
- * @return {?string}
+ * @return {{status: string, role: ?string, reason: string}}
  */
 function getUserRole_(email) {
-  var cache = CacheService.getScriptCache();
-  var rows = null;
-  var hit = cache.get(KS_USERS_CACHE_KEY);
+  var normalized = String(email == null ? '' : email).trim().toLowerCase();
+  if (!normalized) {
+    // Nothing to look up. This is a real answer and needs no Sheet read.
+    return { status: 'denied', role: null, reason: 'no_email' };
+  }
+
+  var key = userCacheKey_(normalized);
+  var hit = cacheGet_(key);
   if (hit) {
     try {
-      rows = JSON.parse(hit);
+      var cached = JSON.parse(hit);
+      if (cached && cached.status === 'ok' && KS_VALID_ROLES.indexOf(cached.role) !== -1) {
+        return { status: 'ok', role: cached.role, reason: 'cached' };
+      }
+      if (cached && cached.status === 'denied') {
+        return { status: 'denied', role: null, reason: 'not_listed' };
+      }
     } catch (err) {
-      rows = null;
+      cacheRemove_(key);
     }
   }
-  if (!rows) {
-    rows = readSheetRows_('Users');
-    cache.put(KS_USERS_CACHE_KEY, JSON.stringify(rows), KS_SHEET_CACHE_TTL_SECONDS);
+
+  var rows;
+  try {
+    rows = readUsersRows_();
+  } catch (err) {
+    // Never cached: an unreadable tab is not an answer, and caching it would
+    // extend one transient failure across every request for its whole TTL.
+    return { status: 'unavailable', role: null, reason: describeError_(err) };
   }
-  return findRole_(rows, email);
+
+  var role = findRole_(rows, normalized);
+  var answer = role
+    ? { status: 'ok', role: role, reason: 'listed' }
+    : { status: 'denied', role: null, reason: 'not_listed' };
+  cachePut_(
+    key,
+    JSON.stringify({ status: answer.status, role: answer.role }),
+    role ? KS_ROLE_OK_TTL_SECONDS : KS_ROLE_DENIED_TTL_SECONDS
+  );
+  return answer;
 }
 
 /**

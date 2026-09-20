@@ -572,7 +572,18 @@ Audience**, and check they are in the `Users` tab too.
 **"This account does not have access."**
 The signed-in address is not in `Users`, or it does not match exactly. The screen
 prints the address it saw — compare it with column A. If you are signed into
-several Google accounts, check you are in the right one.
+several Google accounts, check you are in the right one. Once you add the address
+to `Users`, the next page load within 30 seconds picks it up: a denial is cached
+for 30 s, a grant for 5 minutes.
+
+**"Keystone could not check access right now."**
+Different screen, different problem: the `Users` tab could not be read at all, so
+the app does not know whether this account is allowed in — it is **not** saying
+the account is unlisted, and nobody's access has changed. The screen prints what
+was reported. Reload in a moment; if it persists, check the `Users` tab still
+exists under that exact name in the Keystone Index sheet. Every occurrence writes
+an `auth_unavailable` row to `Log`, so the Log tells an outage apart from a run of
+real denials.
 
 **"Keystone is not configured yet."**
 The page names the missing `Settings` key. Add it and reload. Remember the
