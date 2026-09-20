@@ -255,8 +255,13 @@ function releaseDatesByTag_(releaseJson) {
 }
 
 /**
- * Pure. What an Apps Script API status code most likely means, so the dialog
- * names the fix instead of printing a bare number.
+ * Pure. A labelled hypothesis for an Apps Script API status code.
+ *
+ * This is the one place in the server allowed to speculate, and only because
+ * the caller prints the verbatim response first and prefixes this with
+ * "Possible cause". A message that states a cause it did not verify is how an
+ * hour gets spent on the wrong thing; a message that offers one, after the
+ * facts and marked as a guess, is worth having.
  * @param {number} code
  * @return {string}
  */
@@ -302,10 +307,12 @@ function scriptApiRequest_(method, path, payload) {
   var code = response.getResponseCode();
   var text = String(response.getContentText() || '');
   if (code < 200 || code >= 300) {
+    // Verbatim first, hypothesis last and labelled as one.
+    var hint = updaterApiHint_(code);
     throw ksError_(
       'UPDATER_API_FAILED',
       'The Apps Script API answered ' + code + ' for ' + method.toUpperCase() + ' ' + path +
-        '. ' + updaterApiHint_(code) + ' Response: ' + text.slice(0, 400)
+        '. Response: ' + text.slice(0, 400) + (hint ? ' Possible cause: ' + hint : '')
     );
   }
   try {
@@ -888,4 +895,161 @@ function updaterMenuGate_() {
     }
     return false;
   }
+}
+
+/* -------------------------------------------------------------------------
+ * Access diagnostics
+ *
+ * Added after the third failure in one day whose message named a plausible but
+ * wrong cause. Every check here reports what happened, verbatim; none of them
+ * concludes anything. The point is to make the next "why can't it reach X"
+ * answerable in one click instead of three hypotheses.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Pure. The scope list from a tokeninfo response body.
+ * @param {string} body
+ * @return {!Array<string>} short scope names, sorted
+ */
+function parseGrantedScopes_(body) {
+  var parsed;
+  try {
+    parsed = JSON.parse(String(body == null ? '' : body));
+  } catch (err) {
+    return [];
+  }
+  var raw = String((parsed && parsed.scope) || '').trim();
+  if (!raw) return [];
+  var out = raw.split(/\s+/).map(function (scope) {
+    return scope.replace('https://www.googleapis.com/auth/', '');
+  });
+  out.sort();
+  return out;
+}
+
+/**
+ * Which OAuth scopes this execution's token actually carries.
+ *
+ * The manifest says what was *requested*. Google's consent screen decides what
+ * was *granted*, and on an unverified app a user can grant a subset — so the two
+ * lists can differ, silently, and only this endpoint knows which. The token goes
+ * to Google's own tokeninfo endpoint and nowhere else; only the scope list comes
+ * back out of this function.
+ * @return {{scopes: !Array<string>, error: string}}
+ */
+function grantedScopes_() {
+  try {
+    var response = UrlFetchApp.fetch(
+      'https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=' +
+        encodeURIComponent(ScriptApp.getOAuthToken()),
+      { muteHttpExceptions: true }
+    );
+    if (response.getResponseCode() !== 200) {
+      return { scopes: [], error: 'tokeninfo answered ' + response.getResponseCode() };
+    }
+    return { scopes: parseGrantedScopes_(response.getContentText()), error: '' };
+  } catch (err) {
+    return { scopes: [], error: describeError_(err) };
+  }
+}
+
+/**
+ * Run one probe and record the outcome without interpreting it.
+ * @param {string} label
+ * @param {function():string} probe returns a short description of what it got
+ * @return {{label: string, ok: boolean, detail: string}}
+ */
+function runProbe_(label, probe) {
+  try {
+    return { label: label, ok: true, detail: probe() };
+  } catch (err) {
+    return { label: label, ok: false, detail: describeError_(err) };
+  }
+}
+
+/**
+ * Owner-only. Report identity, granted scopes, and the result of each Apps
+ * Script call the server depends on. Reports; does not diagnose.
+ * @return {!Object}
+ */
+function ksUpdaterDiagnoseAccess() {
+  return updaterCall_(function () {
+    var granted = grantedScopes_();
+    var folderId = '';
+    try {
+      folderId = String(getSetting_('builds_folder_id', '')).trim();
+    } catch (err) {
+      folderId = '';
+    }
+
+    var probes = [
+      runProbe_('Sheet read (Settings tab)', function () {
+        return Object.keys(getSettings_()).length + ' keys';
+      }),
+      runProbe_('Drive at all — DriveApp.getRootFolder()', function () {
+        return 'opened "' + DriveApp.getRootFolder().getName() + '"';
+      }),
+      runProbe_('Builds folder — getFolderById(' + (folderId || 'unset') + ')', function () {
+        if (!folderId) throw new Error('builds_folder_id is unset in Settings');
+        var folder = DriveApp.getFolderById(folderId);
+        return 'opened "' + folder.getName() + '"';
+      }),
+      runProbe_('Apps Script API — GET /content', function () {
+        return (readProjectContent_().files || []).length + ' project files';
+      }),
+      runProbe_('External fetch — GitHub Releases', function () {
+        return updaterFetchReleases_(getSetting_('github_repo', '')).length + ' bytes';
+      })
+    ];
+
+    return {
+      identity: identityNote_(),
+      scriptId: ScriptApp.getScriptId(),
+      grantedScopes: granted.scopes,
+      grantedScopesError: granted.error,
+      probes: probes
+    };
+  });
+}
+
+/** Menu: *Diagnose access…* */
+function ksMenuDiagnoseAccess() {
+  if (!updaterMenuGate_()) return;
+  var html = [
+    updaterDialogStyles_(),
+    '<h2>Diagnose access</h2>',
+    '<p class="muted">What this execution can actually reach, and which OAuth scopes ',
+    'Google really granted — which is not always what the manifest asked for. ',
+    'Every line is a measurement; none of them is a conclusion.</p>',
+    '<div id="host"><p class="muted">Running probes…</p></div>',
+    '<script>',
+    'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){',
+    'return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}',
+    'function fail(m){document.getElementById("host").innerHTML="<p class=\\"err\\">"+esc(m)+"</p>";}',
+    'function show(res){',
+    ' if(res&&res.code){return fail(res.message);}',
+    ' var out="<p>"+esc(res.identity)+"</p>";',
+    ' out+="<p class=\\"muted\\">script id "+esc(res.scriptId)+"</p>";',
+    ' out+="<p><strong>Granted scopes</strong> ("+res.grantedScopes.length+")";',
+    ' out+=res.grantedScopesError?" <span class=\\"err\\">"+esc(res.grantedScopesError)+"</span>":"";',
+    ' out+="</p><ul>";',
+    ' res.grantedScopes.forEach(function(s){out+="<li>"+esc(s)+"</li>";});',
+    ' if(!res.grantedScopes.length){out+="<li class=\\"err\\">none reported</li>";}',
+    ' out+="</ul><p><strong>Probes</strong></p><ul>";',
+    ' res.probes.forEach(function(p){',
+    '  out+="<li><span class=\\""+(p.ok?"ok":"err")+"\\">"+(p.ok?"OK":"FAILED")+"</span> ";',
+    '  out+=esc(p.label)+" — "+esc(p.detail)+"</li>";',
+    ' });',
+    ' out+="</ul>";',
+    ' document.getElementById("host").innerHTML=out;',
+    '}',
+    'google.script.run.withSuccessHandler(show).withFailureHandler(function(e){fail(e.message||e);})',
+    ' .ksUpdaterDiagnoseAccess();',
+    '</script>'
+  ].join('');
+
+  SpreadsheetApp.getUi().showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(640).setHeight(560),
+    'Keystone — diagnose access'
+  );
 }

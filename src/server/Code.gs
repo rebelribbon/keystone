@@ -592,6 +592,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Update server code…', 'ksMenuUpdateServerCode')
     .addItem('Promote server code to stable…', 'ksMenuPromoteServerToStable')
+    .addSeparator()
+    .addItem('Diagnose access…', 'ksMenuDiagnoseAccess')
     .addToUi();
 }
 

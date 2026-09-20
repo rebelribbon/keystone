@@ -374,6 +374,50 @@ function listBuildRows_() {
 }
 
 /**
+ * Pure. An exception rendered for a human, without inventing a cause.
+ *
+ * Every error message in this file used to name the most likely reason for a
+ * failure instead of reporting the failure. That is worse than useless when the
+ * guess is wrong: it sends the reader after the thing the message named, and
+ * three of those in one day cost more than the original bugs did. A message may
+ * state what was attempted and what came back. It may not state why.
+ * @param {*} err
+ * @return {string}
+ */
+function describeError_(err) {
+  if (err == null) return '(no error object)';
+  var name = err.name ? String(err.name) : '';
+  var message = err.message ? String(err.message) : String(err);
+  if (name && message.indexOf(name) !== 0) return name + ': ' + message;
+  return message;
+}
+
+/**
+ * Pure. Which account this code is running as, for an error message.
+ *
+ * Not a diagnosis — a fact. `getEffectiveUser` is the identity whose
+ * authorization the Drive and Sheet calls actually use, and when it differs
+ * from the signed-in user, or is blank, that is worth seeing next to a
+ * permission failure rather than guessing at later.
+ * @return {string}
+ */
+function identityNote_() {
+  var active = '';
+  var effective = '';
+  try {
+    active = String(Session.getActiveUser().getEmail() || '');
+  } catch (err) {
+    active = '(unavailable: ' + describeError_(err) + ')';
+  }
+  try {
+    effective = String(Session.getEffectiveUser().getEmail() || '');
+  } catch (err) {
+    effective = '(unavailable: ' + describeError_(err) + ')';
+  }
+  return 'running as ' + (effective || '(blank)') + ', signed in as ' + (active || '(blank)');
+}
+
+/**
  * The Builds folder named by `builds_folder_id`.
  * @return {!Object} a Drive Folder
  */
@@ -385,9 +429,15 @@ function getBuildsFolder_() {
   try {
     return DriveApp.getFolderById(id);
   } catch (err) {
+    // Report the failure, do not diagnose it. The id is echoed because the
+    // owner can compare it against the Sheet cell in one glance, and the
+    // identity because a permission error means nothing without knowing which
+    // account hit it. Everything else here is verbatim from Apps Script.
     throw ksError_(
-      'SETTING_INVALID',
-      'The Settings key "builds_folder_id" does not name a Drive folder this account can open.'
+      'DRIVE_FOLDER_FAILED',
+      'DriveApp.getFolderById("' + id + '") threw. Apps Script said: ' + describeError_(err) +
+        ' — ' + identityNote_() + '. This does not establish that the id is wrong; ' +
+        'check the granted scopes and the account before changing the Settings cell.'
     );
   }
 }
@@ -434,7 +484,11 @@ function readBuildFile_(driveFileId) {
   try {
     return DriveApp.getFileById(id).getBlob().getBytes();
   } catch (err) {
-    throw ksError_('BUILD_FILE_MISSING', 'The build file could not be opened from Drive.');
+    throw ksError_(
+      'BUILD_FILE_FAILED',
+      'DriveApp.getFileById("' + id + '") threw. Apps Script said: ' + describeError_(err) +
+        ' — ' + identityNote_() + '.'
+    );
   }
 }
 
@@ -450,6 +504,6 @@ function moveBuildFileToTrash_(driveFileId) {
     getTrashFolder_().addFile(file);
     getBuildsFolder_().removeFile(file);
   } catch (err) {
-    console.error('moveBuildFileToTrash_ failed: ' + err);
+    console.error('moveBuildFileToTrash_("' + id + '") threw: ' + describeError_(err));
   }
 }

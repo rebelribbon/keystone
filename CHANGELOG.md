@@ -312,3 +312,45 @@ Ui.showModalDialog"* on the first live run of the updater.
 
 Costs the owner one more re-authorization prompt, for the same reason as ADR
 0002's: the scope list changed.
+
+## 004 follow-up — error messages report instead of diagnosing
+
+The updater failed at the backup step with *"The Settings key builds_folder_id
+does not name a Drive folder this account can open."* The folder id was correct
+and the folder opened fine in a browser. That message was a guess written into a
+`catch`, and it was the third such message in one day to name a plausible but
+wrong cause.
+
+Changed:
+- `src/server/Storage.gs`: `getBuildsFolder_` and `readBuildFile_` no longer
+  replace the exception with a theory. They report the call that was made, the
+  id it was given, the verbatim Apps Script exception, and which account the code
+  ran as — and say explicitly that this does not establish the id is wrong. New
+  codes `DRIVE_FOLDER_FAILED` and `BUILD_FILE_FAILED` replace `SETTING_INVALID`
+  and `BUILD_FILE_MISSING` on those paths.
+- `describeError_` and `identityNote_` (new, pure): render an exception without
+  inventing text, and report active vs. effective user. Both degrade to a note
+  rather than throwing.
+- `src/server/Updater.gs`: the Apps Script API error now leads with the verbatim
+  response and puts its hypothesis last, prefixed *"Possible cause:"*. That is
+  the one place in the server allowed to speculate, and now it is labelled.
+
+Added:
+- **Keystone → Diagnose access…** (owner-only). Reports the identity, the OAuth
+  scopes Google *actually granted* — read from Google's tokeninfo endpoint, not
+  from the manifest, because a consent screen can grant a subset of what was
+  requested — and one line per Apps Script service the server depends on: the
+  Settings read, Drive in general, the Builds folder specifically, the Apps
+  Script API, and an external fetch. Each is OK or the verbatim exception.
+  Nothing in it draws a conclusion.
+  `Drive at all` failing alongside `Builds folder` is the discriminator the
+  original message destroyed: it separates "no Drive access" from "wrong id".
+- Nine tests pinning the contract, including that the old guessed wording is
+  gone, that `Possible cause:` follows the verbatim response, and that the
+  diagnostic never returns the OAuth token.
+- `docs/SETUP.md`: a *Diagnose access* section with a table of what each
+  combination of probe results narrows to, and the old error message's
+  troubleshooting entry rewritten to say it was wrong.
+
+Screenshot: `screenshots/004-diagnose-access.png`, driven in headless Chromium
+against the real `.gs` files with Drive stubbed to fail the way it did live.
