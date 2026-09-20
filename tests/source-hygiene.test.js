@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,18 +51,39 @@ describe("src/ hygiene (§0.5, §0.6, §14.3)", () => {
   });
 });
 
-describe("main.js wiring (ticket 007 §7)", () => {
+describe("main.js wiring (tickets 007 §7, 008 §8)", () => {
   const main = readFileSync(join(root, "src/client/main.js"), "utf8");
 
-  it("exposes the four core modules on KS", () => {
+  it("exposes the core modules on KS", () => {
     for (const key of ["KS.store", "KS.commands", "KS.events", "KS.document"]) {
       expect(main, key).toContain(key + " =");
     }
   });
 
-  it("still mounts the Phase 0 cube and creates no document in boot", () => {
-    expect(main).toContain("mountBootCube(root)");
+  it("boots the lot scene, not the Phase 0 cube (008 §8)", () => {
+    // Ticket 001 said the Phase 1 scene ticket would delete the cube, and 008
+    // is it. Asserting the absence here is what stops it drifting back.
+    expect(main).not.toMatch(/boot-?cube|mountBootCube/i);
+    expect(main).toContain("createLotScene");
+  });
+
+  it("creates the in-memory build inside boot (008 §8)", () => {
     const boot = main.slice(main.indexOf("KS.boot = function boot"));
-    expect(boot).not.toMatch(/createBuildDocument/);
+    expect(boot).toMatch(/createBuildDocument/);
+    expect(boot).toContain("createLotScene");
+  });
+
+  it("makes no server call from boot", () => {
+    // 008 §8: "No server calls, no persistence."
+    const boot = main.slice(main.indexOf("KS.boot = function boot"));
+    expect(boot).not.toMatch(/callServer|saveBuild|loadBuild|google\.script/);
+  });
+});
+
+describe("src/client/dev/boot-cube.js is gone (008 §8)", () => {
+  it("is not on disk and nothing references it", () => {
+    expect(existsSync(join(root, "src/client/dev/boot-cube.js"))).toBe(false);
+    const offenders = SOURCES.filter((path) => /boot-?cube/i.test(readFileSync(path, "utf8")));
+    expect(offenders.map((p) => p.replace(root + "/", ""))).toEqual([]);
   });
 });

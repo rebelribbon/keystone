@@ -117,3 +117,110 @@ Build camera per §12.1:
 - [ ] No `TODO` in `src/`, no `localStorage`, no secrets.
 
 ## Handoff (Builder fills in)
+
+### What changed
+
+Nine new modules and the boot rewrite. `src/client/dev/boot-cube.js` is deleted.
+
+Files: `src/client/engine/` — `sun.js`, `scheduler.js`, `presets.js`,
+`renderer.js`, `sky.js`, `camera-math.js`, `camera.js`, `grid.js`, `sync.js`,
+`scene.js`, `three.js` (all new); `src/client/geometry/terrain.js` (new);
+`src/client/dev/sun-scrub.js` (new); `src/client/main.js`; `src/server/Code.gs`;
+`src/server/Index.html`; four new test files; `docs/DEFERRED.md`;
+`docs/PHASE0_RESULTS.md`; `CHANGELOG.md`; five screenshots.
+
+**405 tests across 17 files**, up from 328. `npm run build` passes.
+
+### Verified in the browser, because the headline requirement can only be
+
+Render on demand is the one acceptance item that passes every unit test even
+when it is completely broken, so it was measured against the real bundle in
+headless Chromium:
+
+| Check | Result |
+|---|---|
+| Frames after the scene settles | **1**, and still **1** after 3 s idle |
+| Two `setIn` in one command | **1** frame, 1 `requestRender` |
+| Two separate commands | **2** frames — batching, not a dropped render |
+| Camera move, then idle | 14 frames of spring, then **0** |
+| Geometry / texture count after 10 lot resizes | 5 / 1 → **5 / 1**, no leak |
+| First render of the lot scene | 46 ms (software renderer) |
+| Console | clean, no errors or warnings |
+
+Screenshots: `008-lot-scene.png` (default view), `008-horizon.png` (low pitch,
+sky and fog), and `008-sun-0600/1200/2100.png` for the `?dev=sun` traverse —
+dawn orange at 11.5° elevation, clear blue at 83.4°, stars at −21.3°.
+
+### Three defects the work surfaced
+
+**1. The camera spring overshot by 10%.** My closed-form critically damped step
+was missing the `−ω·v·t` term in the velocity, so the camera sailed past where
+you let go and came back. Caught by a test that asserted no overshoot rather
+than only that it settles. Fixing it also cut settling from 43 frames to 14 —
+29 fewer frames rendered per camera nudge, which is the whole point of §4.2.
+
+**2. Night was unreadable.** §8.1 asks for a "subtle `AmbientLight` at night for
+readability"; at 0.25 the lot rendered black under ACES and the 0.55 night
+exposure. Atmospheric and useless. The number is set by the word "readability",
+so it is 0.9 and the screenshot shows a legible lot under stars.
+
+**3. The `?dev=sun` readout lagged the scene.** It showed 00:10 while the sky was
+at 21:00, because it painted from its own writes rather than from the store. It
+now subscribes to `environment` changes, so any path that moves the sun updates
+it. Worth recording: the first 21:00 screenshot looked plausible and was wrong,
+and only the mismatch between the caption and the sky gave it away.
+
+### Deviations and judgement calls
+
+- **`computeSunPosition` lives in `engine/sun.js`, not inside `sky.js`.** §2 of
+  the ticket requires it be "exported separately from anything touching
+  Three.js"; a separate module makes that structural rather than a convention,
+  and `sky.js` re-exports it so callers see one surface.
+- **`camera-math.js` is split from `camera.js`** for the same reason: the clamps
+  and the spring are the parts with acceptance criteria, and they test with no
+  DOM and no GL.
+- **`engine/scene.js` is a new file the ticket does not name.** Something has to
+  own which builders exist and in what order; putting it in `main.js` would make
+  boot untestable, and putting it in `sync.js` would defeat the registry.
+- **The boot payload now carries the raw `dev` string.** `?dev=sun` needed a
+  server change either way. Passing the string instead of adding `devSun`
+  alongside `devGates` and `devGate3` means §18's `?dev=gallery` and `?dev=stats`
+  need no further server update. Owner-only, as the other dev routes are.
+- **The sky shader multiplies its colours by 1.75 before output.** ACES (§8.1)
+  compresses midtones hard, and the palette names colours as the sky should
+  *look*; without the lift a clear afternoon renders slate grey. The constant is
+  named `ACES_GAIN` with the measurement in its comment rather than being an
+  unexplained magic number in the shader.
+- **The ground ring is a shade darker than the lot.** The buildable area has to
+  read at a glance, and tinting is one fewer thing to keep in sync with the lot
+  size than a boundary outline would be.
+- **`store.deleteIn` is not used here.** Nothing in this ticket deletes; the
+  lot-resize path replaces `lot.size` and rebuilds.
+
+### One thing the Architect may want to look at
+
+**At §6's default camera the sky is not visible.** `pitch: 0.62` is 35.5°; with a
+50° vertical field of view the top of the frame sits about 10° *below* the
+horizon, so the default view is entirely ground — `008-lot-scene.png` shows it.
+Nothing is broken, the geometry is right, and orbiting down to about 0.25 rad
+brings the horizon in (`008-horizon.png`). But the first frame a new user sees
+has no sky in it, which undersells the thing and reads as a missing feature.
+
+I have not changed it: `createBuildDocument` must match §6 character for
+character, and the default camera is §6's. If the Architect agrees the default
+should show the horizon, it is a one-number §6 amendment (pitch ≈ 0.35) and not
+a code change.
+
+### What the next ticket inherits
+
+- `sync.registerBuilder(category, fn)` is how walls, roofs and objects attach.
+  `sync.js` should not need editing again. **The builder owns disposal** — that
+  contract is in its docstring and the ten-resize leak test is what keeps it
+  honest.
+- `view.requestRender()` is the only render trigger, and `sync.apply` is the only
+  place that calls it on a store change. Keeping that to one call site is what
+  makes the render-on-demand check above meaningful.
+- `KS.scene` exposes `view`, `camera`, `sync`, `sky`, `terrain` and `grid` for
+  the dev routes and the tests.
+- Picking, double-click focus and the tools are still out; the camera claims
+  right-drag and middle-drag and deliberately leaves left-drag alone for them.

@@ -437,3 +437,51 @@ Two decisions worth keeping:
 Changed:
 - `src/client/main.js`: exposes `KS.store`, `KS.commands`, `KS.events`,
   `KS.document`, `KS.buildCommands` and `KS.migrations`. `KS.boot` is unchanged.
+
+## 008 — Scene, lot, and build camera
+
+The store becomes something you can look at (spec §4.1, §4.2, §5, §8.1–8.3,
+§12.1). Opening the page now shows an empty lot under a sky you can orbit, pan
+and zoom, with the sun moving when `timeOfDay` changes.
+
+Added:
+- `src/client/engine/sun.js`: `computeSunPosition` per §8.2 and `skyPalette`.
+  Pure, importing nothing, so the sky, the lights, the shadows and the exposure
+  all derive from one testable function.
+- `src/client/engine/scheduler.js`: **render on demand** (§4.2) and the adaptive
+  pixel ratio. Ticket 001 deferred render-on-demand to "the real engine in
+  Phase 1"; this is it, and the `docs/DEFERRED.md` entry is gone.
+- `src/client/engine/renderer.js`: §8.1 setup, the three lights, fog, a shadow
+  frustum fitted to the lot, resize, and context-loss recovery that rebuilds the
+  renderer instead of leaving a dead canvas.
+- `src/client/engine/sky.js`: shader dome with gradient, sun disc, horizon haze
+  and stars.
+- `src/client/engine/presets.js`: the §8.3 table exactly.
+- `src/client/engine/camera-math.js` and `camera.js`: the §12.1 build camera and
+  the `Tab` free camera.
+- `src/client/engine/grid.js`, `src/client/geometry/terrain.js`,
+  `src/client/engine/sync.js`, `src/client/engine/scene.js`.
+- `src/client/dev/sun-scrub.js`: the `?dev=sun` route.
+- 74 tests across four new files.
+
+Changed:
+- `src/client/main.js`: `KS.boot` builds the lot scene from a real Build
+  document. **`src/client/dev/boot-cube.js` is deleted**, as ticket 001 said
+  this ticket would.
+- `src/server/Code.gs`: the boot payload carries the raw owner-only `dev` string
+  rather than one boolean per route, so the next dev route needs no server
+  update — and a server update is the one step here that cannot be automated
+  away. **This needs one *Update server code* run to take effect.**
+- `docs/PHASE0_RESULTS.md`: notes that gate 1 now times the lot scene rather than
+  the cube, keeping the 109 ms as the historical figure rather than letting a
+  later number read as a regression against different content.
+
+Three defects found by the work, worth keeping:
+- **The camera spring overshot by 10%.** The closed-form velocity term was
+  missing its `−ω·v·t`. Caught by a test that asserted no overshoot; the fix also
+  cut settling from 43 frames to 14, which is 29 fewer frames rendered per nudge.
+- **Night was unreadable.** §8.1 asks for "subtle ambient at night for
+  readability" and 0.25 rendered the lot black under ACES and the night exposure.
+  The word that sets the number is "readability".
+- **The `?dev=sun` readout lagged the scene**, showing 00:10 while the sky was at
+  21:00, because it painted from its own writes rather than from the store.

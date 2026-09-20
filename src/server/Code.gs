@@ -352,6 +352,11 @@ function doGet(e) {
     degradedReason: release.degradedReason,
     loaderMode: loaderMode,
     devGates: devGates,
+    // The raw ?dev= value, owner-only. Ticket 008 added ?dev=sun; passing the
+    // string rather than one boolean per route means the next dev route
+    // (§18's gallery and stats) needs no server update at all — and a server
+    // update is the one step in this project that cannot be automated away.
+    dev: access.role === 'owner' ? String(params.dev == null ? '' : params.dev) : '',
     // Ticket 004 writes these after every server update, so ?dev=gates always
     // has an answer to "what server code is actually running". Owner-only and
     // gates-only: it is a build tag and six truncated digests of public files,
