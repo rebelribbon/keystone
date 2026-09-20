@@ -77,17 +77,27 @@ function createServer(options = {}) {
     };
   }
 
+  // TTLs are recorded, not enforced: ticket 006 makes the expiry of an
+  // authorization answer part of the contract (300 s for a grant, 30 s for a
+  // denial), so a test has to be able to read back what was asked for.
+  const ttls = new Map();
   const cache = {
     get: (k) => (store.has(k) ? store.get(k) : null),
-    put: (k, v) => store.set(k, String(v)),
+    put: (k, v, ttl) => {
+      store.set(k, String(v));
+      ttls.set(k, ttl);
+    },
     remove: (k) => store.delete(k),
     getAll: (keys) => {
       const out = {};
       for (const k of keys) if (store.has(k)) out[k] = store.get(k);
       return out;
     },
-    putAll: (obj) => {
-      for (const k of Object.keys(obj)) store.set(k, String(obj[k]));
+    putAll: (obj, ttl) => {
+      for (const k of Object.keys(obj)) {
+        store.set(k, String(obj[k]));
+        ttls.set(k, ttl);
+      }
     },
   };
 
@@ -172,7 +182,17 @@ function createServer(options = {}) {
   });
   sandbox.HtmlService = {
     createHtmlOutput: (html) => {
-      const output = { html, setWidth: () => output, setHeight: () => output };
+      // The standalone screens (access, unavailable, configuration) chain the
+      // same calls doGet's template output does, so the fake has to carry them
+      // or a screen can only be tested by string-matching its builder.
+      const output = {
+        html,
+        setWidth: () => output,
+        setHeight: () => output,
+        setTitle: () => output,
+        addMetaTag: () => output,
+        setXFrameOptionsMode: () => output,
+      };
       return output;
     },
     // Enough of the templating surface for doGet to run end to end: the
@@ -202,7 +222,7 @@ function createServer(options = {}) {
   vm.runInContext(CODE_SRC, sandbox, { filename: "Code.gs" });
   vm.runInContext(API_SRC, sandbox, { filename: "Api.gs" });
   vm.runInContext(UPDATER_SRC, sandbox, { filename: "Updater.gs" });
-  return { g: sandbox, store, logRows, fetches, cache, sheets, dialogs, drive, templates };
+  return { g: sandbox, store, ttls, logRows, fetches, cache, sheets, dialogs, drive, templates };
 }
 
 /** Apps Script's FileIterator shape over a plain array. */
@@ -306,40 +326,69 @@ describe("resolveChannel_ (ADR 0001)", () => {
   });
 });
 
-describe("decideAccess_", () => {
+describe("decideAccess_ (ticket 006 §2: three outcomes, not two)", () => {
   const { g } = createServer();
+  const ok = (role) => ({ status: "ok", role, reason: "listed" });
+  const denied = { status: "denied", role: null, reason: "not_listed" };
+  const unavailable = { status: "unavailable", role: null, reason: "Error: cache backend unavailable" };
 
   it("denies an empty email", () => {
-    const d = g.decideAccess_("", "owner");
+    const d = g.decideAccess_("", ok("owner"));
     expect(d.allowed).toBe(false);
+    expect(d.status).toBe("denied");
     expect(d.code).toBe("ACCESS_DENIED");
     expect(d.reason).toBe("no_email");
   });
 
-  it("denies an email with no Users row", () => {
-    const d = g.decideAccess_("stranger@example.com", null);
+  it("denies an email the Users tab was read for and did not list", () => {
+    const d = g.decideAccess_("stranger@example.com", denied);
     expect(d.allowed).toBe(false);
+    expect(d.status).toBe("denied");
     expect(d.code).toBe("ACCESS_DENIED");
     expect(d.reason).toBe("not_listed");
     expect(d.email).toBe("stranger@example.com");
   });
 
   it("allows a listed email and returns its role", () => {
-    const d = g.decideAccess_("owner@example.com", "owner");
+    const d = g.decideAccess_("owner@example.com", ok("owner"));
     expect(d.allowed).toBe(true);
+    expect(d.status).toBe("ok");
     expect(d.role).toBe("owner");
     expect(d.code).toBeNull();
   });
 
+  it("reports an unreadable Users tab as unavailable, never as a denial", () => {
+    const d = g.decideAccess_("owner@example.com", unavailable);
+    expect(d.allowed).toBe(false);
+    expect(d.status).toBe("unavailable");
+    expect(d.code).toBe("AUTH_UNAVAILABLE");
+    expect(d.reason).toContain("cache backend unavailable");
+  });
+
   it("is case- and whitespace-insensitive on both email and role", () => {
-    const d = g.decideAccess_("  Owner@Example.COM  ", "  Editor ");
+    const d = g.decideAccess_("  Owner@Example.COM  ", ok("  Editor "));
     expect(d.allowed).toBe(true);
     expect(d.email).toBe("owner@example.com");
     expect(d.role).toBe("editor");
   });
 
-  it("denies a role that is not one of the three", () => {
-    expect(g.decideAccess_("x@example.com", "admin").allowed).toBe(false);
+  it("denies a listed row whose role is not one of the three", () => {
+    const d = g.decideAccess_("x@example.com", ok("admin"));
+    expect(d.allowed).toBe(false);
+    expect(d.status).toBe("denied");
+    expect(d.reason).toBe("invalid_role");
+  });
+
+  it("treats a missing or malformed tri-state as unavailable, not as a denial", () => {
+    // A caller that hands over no answer has not established that there is
+    // none. The old signature took a bare role and read null as "not listed",
+    // which is exactly the defect; that shape must not deny again.
+    for (const value of [null, undefined, "owner", 0, { status: "maybe" }]) {
+      const d = g.decideAccess_("owner@example.com", value);
+      expect(d.allowed, String(value)).toBe(false);
+      expect(d.status, String(value)).toBe("unavailable");
+      expect(d.code, String(value)).toBe("AUTH_UNAVAILABLE");
+    }
   });
 });
 
@@ -604,8 +653,8 @@ describe("Sheet helpers", () => {
     const { g } = createServer({
       usersRows: [USERS_HEADER, ["Owner@Example.com", "owner", ""]],
     });
-    expect(g.getUserRole_("owner@example.com")).toBe("owner");
-    expect(g.getUserRole_("stranger@example.com")).toBeNull();
+    expect(g.getUserRole_("owner@example.com")).toMatchObject({ status: "ok", role: "owner" });
+    expect(g.getUserRole_("stranger@example.com")).toMatchObject({ status: "denied", role: null });
   });
 
   it("logRow_ appends a timestamped row", () => {
@@ -650,6 +699,291 @@ describe("doGet access control", () => {
       settingsRows,
       usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]],
     });
+    expect(g.api_whoami()).toEqual({ email: "owner@example.com", role: "owner" });
+  });
+});
+
+describe("a cache failure must not read as a denial (ticket 006)", () => {
+  const LISTED = "owner@example.com";
+  const USERS = [USERS_HEADER, [LISTED, "owner", ""]];
+
+  /** Count Users reads, so "the Sheet was actually read" is observed, not assumed. */
+  function countUsersReads(sheets) {
+    const counter = { reads: 0 };
+    const real = sheets.Users;
+    sheets.Users = {
+      getDataRange: () => {
+        counter.reads++;
+        return real.getDataRange();
+      },
+    };
+    return counter;
+  }
+
+  /** Make every cache read throw the way a CacheService outage does. */
+  function breakCacheGet(cache) {
+    cache.get = () => {
+      throw new Error("cache backend unavailable");
+    };
+    cache.getAll = () => {
+      throw new Error("cache backend unavailable");
+    };
+  }
+
+  it("a throwing cache get still resolves a listed account, by reading the Sheet", () => {
+    const { g, sheets, cache } = createServer({ email: LISTED, usersRows: USERS });
+    const counter = countUsersReads(sheets);
+    breakCacheGet(cache);
+
+    const result = g.getUserRole_(LISTED);
+    expect(result).toMatchObject({ status: "ok", role: "owner" });
+    expect(counter.reads).toBe(1);
+  });
+
+  it("a throwing cache get still denies an unlisted account", () => {
+    const { g, cache } = createServer({ email: "stranger@example.com", usersRows: USERS });
+    breakCacheGet(cache);
+    expect(g.getUserRole_("stranger@example.com")).toMatchObject({ status: "denied", role: null });
+  });
+
+  it("a Users read that throws is unavailable, not denied", () => {
+    const { g, sheets } = createServer({ email: LISTED, usersRows: USERS });
+    sheets.Users = {
+      getDataRange: () => {
+        throw new Error("Sheet service unavailable");
+      },
+    };
+    const result = g.getUserRole_(LISTED);
+    expect(result.status).toBe("unavailable");
+    expect(result.status).not.toBe("denied");
+    expect(result.reason).toContain("Sheet service unavailable");
+  });
+
+  it("a missing Users tab is unavailable, not an empty access list", () => {
+    // The live check renames the tab. An empty read would look exactly like a
+    // tab that lists other people, which is how this bug denied everyone.
+    const { g, sheets } = createServer({ email: LISTED, usersRows: USERS });
+    delete sheets.Users;
+    expect(g.getUserRole_(LISTED)).toMatchObject({ status: "unavailable" });
+  });
+
+  it("a throwing cache put does not fail the request", () => {
+    const { g, cache } = createServer({ email: LISTED, usersRows: USERS });
+    cache.put = () => {
+      throw new Error("cache backend unavailable");
+    };
+    cache.putAll = () => {
+      throw new Error("cache backend unavailable");
+    };
+    expect(g.getUserRole_(LISTED)).toMatchObject({ status: "ok", role: "owner" });
+    expect(g.api_whoami()).toEqual({ email: LISTED, role: "owner" });
+    expect(g.getSettings_()).toEqual({});
+  });
+
+  it("an empty email is denied without touching the Sheet", () => {
+    const { g, sheets } = createServer({ email: "", usersRows: USERS });
+    const counter = countUsersReads(sheets);
+    expect(g.getUserRole_("")).toMatchObject({ status: "denied", reason: "no_email" });
+    expect(counter.reads).toBe(0);
+    expect(g.api_whoami()).toMatchObject({ code: "ACCESS_DENIED" });
+  });
+
+  it("never caches an unavailable answer", () => {
+    const { g, store, sheets } = createServer({ email: LISTED, usersRows: USERS });
+    sheets.Users = {
+      getDataRange: () => {
+        throw new Error("Sheet service unavailable");
+      },
+    };
+    g.getUserRole_(LISTED);
+    expect([...store.keys()].filter((k) => k.indexOf("ks_user_") === 0)).toEqual([]);
+  });
+
+  it("caches a grant for 300 s and a denial for 30 s", () => {
+    // The old code cached the rows for 300 s either way, so adding someone to
+    // the Users tab appeared not to work for five minutes.
+    const { g, ttls } = createServer({ email: LISTED, usersRows: USERS });
+    g.getUserRole_(LISTED);
+    g.getUserRole_("stranger@example.com");
+    expect(ttls.get("ks_user_" + LISTED)).toBe(300);
+    expect(ttls.get("ks_user_stranger@example.com")).toBe(30);
+  });
+
+  it("serves a cached answer without re-reading the Sheet, and re-reads once it is gone", () => {
+    const { g, sheets, store } = createServer({ email: LISTED, usersRows: USERS });
+    const counter = countUsersReads(sheets);
+    expect(g.getUserRole_(LISTED)).toMatchObject({ status: "ok", role: "owner" });
+    expect(g.getUserRole_(LISTED)).toMatchObject({ status: "ok", role: "owner" });
+    expect(counter.reads).toBe(1);
+
+    // What a 30 s expiry buys: the answer is re-read from the Sheet, so a row
+    // added after a denial takes effect on the next call, not five minutes on.
+    store.delete("ks_user_" + LISTED);
+    expect(g.getUserRole_(LISTED)).toMatchObject({ status: "ok", role: "owner" });
+    expect(counter.reads).toBe(2);
+  });
+
+  it("doGet renders the service-unavailable screen and logs auth_unavailable", () => {
+    const { g, logRows, sheets } = createServer({
+      email: LISTED,
+      usersRows: USERS,
+      settingsRows: [SETTINGS_HEADER, ["stable_tag", "build-1"]],
+    });
+    sheets.Users = {
+      getDataRange: () => {
+        throw new Error("Sheet service unavailable");
+      },
+    };
+
+    const html = g.doGet({ parameter: {} }).html || "";
+    expect(html).toContain("could not check access right now");
+    expect(html).not.toContain("access list.</p>");
+    expect(html).not.toMatch(/not on the Keystone access list/);
+    expect(html).toContain("Sheet service unavailable");
+
+    expect(logRows.map((r) => r[2])).toEqual(["auth_unavailable"]);
+    expect(String(logRows[0][4])).toContain("Sheet service unavailable");
+  });
+
+  it("doGet still shows the access screen, and logs access_denied, for an unlisted account", () => {
+    const { g, logRows } = createServer({
+      email: "stranger@example.com",
+      usersRows: USERS,
+      settingsRows: [SETTINGS_HEADER, ["stable_tag", "build-1"]],
+    });
+    const html = g.doGet({ parameter: {} }).html || "";
+    expect(html).toContain("not on the Keystone access list");
+    expect(logRows.map((r) => r[2])).toEqual(["access_denied"]);
+  });
+
+  it("doGet serves a listed account normally while the cache is down", () => {
+    const { g, cache, logRows, templates } = createServer({
+      email: LISTED,
+      usersRows: USERS,
+      settingsRows: [SETTINGS_HEADER, ["stable_tag", "build-1"]],
+    });
+    breakCacheGet(cache);
+    cache.put = () => {
+      throw new Error("cache backend unavailable");
+    };
+    cache.putAll = () => {
+      throw new Error("cache backend unavailable");
+    };
+
+    g.doGet({ parameter: {} });
+    expect(templates).toHaveLength(1);
+    expect(JSON.parse(templates[0].bootJson)).toMatchObject({ user: LISTED, role: "owner" });
+    expect(logRows).toEqual([]);
+  });
+
+  it("every api_* function answers AUTH_UNAVAILABLE, not ACCESS_DENIED", () => {
+    const CALLS = [
+      ["api_whoami", []],
+      ["api_listBuilds", []],
+      ["api_beginSave", [null, {}]],
+      ["api_saveChunk", ["u_1", 0, "AAAA"]],
+      ["api_commitSave", ["u_1", 1, null]],
+      ["api_loadBuildInfo", ["b_1"]],
+      ["api_loadChunk", ["b_1", 0]],
+      ["api_deleteBuild", ["b_1"]],
+      ["api_getSettings", []],
+      ["api_setSetting", ["stable_tag", "build-9"]],
+      ["api_getBundle", ["build-5", "engine.js"]],
+      ["api_devEvictChunk", ["ks_dl_b_1_1", 0]],
+    ];
+    for (const [name, args] of CALLS) {
+      const { g, sheets } = createServer({ email: LISTED, usersRows: USERS });
+      sheets.Users = {
+        getDataRange: () => {
+          throw new Error("Sheet service unavailable");
+        },
+      };
+      const result = g[name].apply(null, args);
+      expect(result, name).toMatchObject({ code: "AUTH_UNAVAILABLE" });
+      expect(result.message, name).toContain("Try again in a moment");
+    }
+  });
+
+  it("logs auth_unavailable once per refused api_* call", () => {
+    const { g, logRows, sheets } = createServer({ email: LISTED, usersRows: USERS });
+    sheets.Users = {
+      getDataRange: () => {
+        throw new Error("Sheet service unavailable");
+      },
+    };
+    g.api_whoami();
+    expect(logRows.map((r) => r[2])).toEqual(["auth_unavailable"]);
+    expect(logRows.filter((r) => r[2] === "access_denied")).toEqual([]);
+  });
+
+  it("the updater's owner gate reports unavailable rather than a refusal", () => {
+    const { g, sheets } = createServer({ email: LISTED, usersRows: USERS });
+    sheets.Users = {
+      getDataRange: () => {
+        throw new Error("Sheet service unavailable");
+      },
+    };
+    expect(() => g.requireUpdaterOwner_()).toThrow();
+    try {
+      g.requireUpdaterOwner_();
+    } catch (err) {
+      expect(err.ksCode).toBe("AUTH_UNAVAILABLE");
+    }
+  });
+});
+
+describe("every cache interaction goes through the Storage.gs helpers (ticket 006 §1)", () => {
+  /** Drop doc comments and whole-line comments; a mention is not a reference. */
+  function stripComments(text) {
+    return text
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((line) => line.trim().indexOf("//") !== 0)
+      .join("\n");
+  }
+
+  const SERVER_FILES = ["Storage.gs", "Code.gs", "Api.gs", "Updater.gs"];
+
+  it("names CacheService exactly once in src/server/, inside ksCache_", () => {
+    const hits = [];
+    for (const file of SERVER_FILES) {
+      const code = stripComments(readFileSync(join(root, "src/server", file), "utf8"));
+      const found = code.match(/CacheService/g) || [];
+      if (found.length) hits.push([file, found.length]);
+    }
+    expect(hits).toEqual([["Storage.gs", 1]]);
+
+    const storage = stripComments(STORAGE_SRC);
+    const body = storage.slice(storage.indexOf("function ksCache_("));
+    expect(body.slice(0, body.indexOf("\n}"))).toContain("CacheService.getScriptCache()");
+  });
+
+  it("exposes the five helpers, and none of them throws when the cache is down", () => {
+    const { g, cache } = createServer();
+    for (const name of ["cacheGet_", "cacheGetAll_", "cachePut_", "cachePutAll_", "cacheRemove_"]) {
+      expect(typeof g[name], name).toBe("function");
+    }
+    for (const method of ["get", "getAll", "put", "putAll", "remove"]) {
+      cache[method] = () => {
+        throw new Error("cache backend unavailable");
+      };
+    }
+    expect(g.cacheGet_("k")).toBeNull();
+    expect(g.cacheGetAll_(["k"])).toEqual({});
+    expect(g.cachePut_("k", "v", 60)).toBe(false);
+    expect(g.cachePutAll_({ k: "v" }, 60)).toBe(false);
+    expect(g.cacheRemove_("k")).toBe(false);
+  });
+
+  it("survives a script cache that cannot even be acquired", () => {
+    const { g } = createServer({ email: "owner@example.com", usersRows: [USERS_HEADER, ["owner@example.com", "owner", ""]] });
+    g.CacheService = {
+      getScriptCache: () => {
+        throw new Error("CacheService unavailable");
+      },
+    };
+    expect(g.cacheGet_("k")).toBeNull();
+    expect(g.cachePut_("k", "v", 60)).toBe(false);
     expect(g.api_whoami()).toEqual({ email: "owner@example.com", role: "owner" });
   });
 });

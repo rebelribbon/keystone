@@ -71,8 +71,8 @@ Do not add a hardcoded owner email, an environment escape hatch, or any bypass t
 
 ## Acceptance
 
-- [ ] `npm test` and `npm run build` pass.
-- [ ] `tests/server-logic.test.js`, using the eval-sandbox harness, covers:
+- [x] `npm test` and `npm run build` pass.
+- [x] `tests/server-logic.test.js`, using the eval-sandbox harness, covers:
   - cache `get` throws, `Users` tab readable, listed email → `ok`, and the Sheet was actually read;
   - cache `get` throws, `Users` tab readable, unlisted email → `denied`;
   - `Users` tab read throws → `unavailable`, **not** `denied`;
@@ -81,12 +81,118 @@ Do not add a hardcoded owner email, an environment escape hatch, or any bypass t
   - `unavailable` is never written to the cache;
   - a `denied` entry expires in 30 s and an `ok` entry in 300 s;
   - `decideAccess_` maps all three states correctly.
-- [ ] A static test asserts no raw `CacheService` reference exists in `src/server/` outside the helpers in `Storage.gs`.
-- [ ] `tests/transport.test.js`: `AUTH_UNAVAILABLE` is retried once; `ACCESS_DENIED` is not retried.
+- [x] A static test asserts no raw `CacheService` reference exists in `src/server/` outside the helpers in `Storage.gs`.
+- [x] `tests/transport.test.js`: `AUTH_UNAVAILABLE` is retried once; `ACCESS_DENIED` is not retried.
 - [ ] Live: with the `Users` sheet temporarily renamed so the read fails, the deployed URL shows the service-unavailable screen, not the access screen, and an `auth_unavailable` row lands in `Log`. Restoring the name restores access without waiting out a TTL.
 - [ ] Live: adding an email to `Users` grants access within 30 s, not 5 minutes.
-- [ ] An unlisted account still gets the access screen, unchanged.
-- [ ] Ticket 005's chunk cache goes through the new helpers, and its eviction-fallback tests still pass.
-- [ ] No hardcoded emails, no bypass path, no secrets. No `TODO` in `src/`.
+- [ ] An unlisted account still gets the access screen, unchanged. *(asserted in
+  the sandbox by running `doGet`; the live check is step 3 below.)*
+- [x] Ticket 005's chunk cache goes through the new helpers, and its eviction-fallback tests still pass.
+- [x] No hardcoded emails, no bypass path, no secrets. No `TODO` in `src/`.
 
 ## Handoff (Builder fills in)
+
+### The reproduction matches the description
+
+Confirmed before writing code, in the ticket 002 eval sandbox with a
+`CacheService` whose `get` and `put` both throw and a `Users` tab listing
+`owner@example.com` as `owner`:
+
+- `api_whoami()` → `{"code":"ACCESS_DENIED","message":"This Google account is not on the Keystone access list."}`
+- `doGet({})` → the access screen, containing "not on the Keystone access list"
+- `Log` → one row: `owner@example.com | access_denied | | reason=not_listed`
+
+Fail-closed on an infrastructure error, exactly as the ticket reads it. The
+`getUserRole_` half is the `put` throwing on the write-back after the Sheet read,
+so even a cache that only fails writes denied every user. No deviation from the
+described shape, so the fix below is the one the ticket specifies.
+
+### What changed
+
+`src/server/Storage.gs`
+- `ksCache_` plus `cacheGet_`, `cacheGetAll_`, `cachePut_`, `cachePutAll_`,
+  `cacheRemove_`. None throws. `CacheService` appears once in all of
+  `src/server/`, inside `ksCache_`, which itself tolerates a failure to acquire
+  the cache at all.
+- `readUsersRows_`: throws on a missing `Users` tab instead of answering `[]`.
+  This is the hinge of the whole ticket — `readSheetRows_`'s empty array is
+  indistinguishable from a tab listing other people.
+- `getUserRole_` returns the tri-state and never throws. Per-email answers are
+  cached: `ok` 300 s (`KS_ROLE_OK_TTL_SECONDS`), `denied` 30 s
+  (`KS_ROLE_DENIED_TTL_SECONDS`), `unavailable` never. An empty email is
+  `denied` with reason `no_email` and does not read the Sheet.
+- `getSettings_` and `invalidateSettings_` go through the helpers.
+
+`src/server/Code.gs`
+- `decideAccess_(email, roleResult)` returns `status` alongside `allowed`, with
+  code `AUTH_UNAVAILABLE` for `unavailable`. A non-tri-state second argument
+  resolves to `unavailable`, never to a denial.
+- `doGet` renders `renderUnavailableScreen_` and logs `auth_unavailable` for
+  `unavailable`; the `denied` path is untouched.
+- `api_getBundle` and `fetchNewestTag_` use the shared helpers and
+  `requireAccess_` / `accessError_`.
+
+`src/server/Api.gs`
+- `requireAccess_` never converts a failure into a denial; `accessError_` maps a
+  refusal to `ACCESS_DENIED` or `AUTH_UNAVAILABLE`; `apiCall_` logs
+  `auth_unavailable` on the second.
+- Upload and download caches routed through the helpers; `putCacheBatch_`
+  removed.
+
+`src/server/Updater.gs`
+- The owner gate raises `accessError_`'s code, so the update dialogs say "try
+  again", not "you are not on the list".
+
+`src/client/persistence/transport.js`
+- `AUTH_UNAVAILABLE` is retried once after `RETRY_DELAY_MS` (1500 ms).
+  `ACCESS_DENIED` and every other structured error are surfaced without a retry.
+
+### One judgement call worth flagging
+
+Requirement 1 says the helpers never propagate, and requirement 4's "the request
+still completes successfully" is written about the auth path. Applied literally
+to the **upload** cache, a swallowed `put` would turn a failed save into a
+reported success that only falls over at commit with `CHUNK_MISSING`. The upload
+cache is the store for a save in progress (SPEC §14.2), not an optimization over
+one, so `api_beginSave` and `api_saveChunk` check `cachePut_`'s return and raise
+`CACHE_WRITE_FAILED`. The helpers still never throw; the caller decides. The
+download cache (ticket 005) and the settings, users, tag, and bundle caches all
+degrade silently, as specified.
+
+### How the owner verifies it on the test URL
+
+1. **The unavailable screen.** In the Keystone Index sheet, rename the `Users`
+   tab to `Users_off`. Load the test URL. Expect *"Keystone could not check
+   access right now"* — not the access screen, and no mention of the access
+   list. The `Log` tab gets one `auth_unavailable` row naming the missing tab.
+2. **Restoring it restores access with no TTL wait.** Rename the tab back to
+   `Users` and reload. The app loads. Nothing was cached during the outage, so
+   there is nothing to wait out.
+3. **A denial still looks like a denial.** Open the test URL from a Google
+   account that is a Cloud test user but has no `Users` row. Expect the
+   unchanged access screen and one `access_denied` row.
+4. **30 s, not 5 minutes.** With that same account still denied, add its address
+   to `Users` with role `viewer`. Reload after half a minute: it gets in. Before
+   this ticket that took five minutes.
+5. **The client retry.** Rename `Users` to `Users_off` *while the app is open*,
+   then trigger a server call (the build list). The call is retried once about a
+   second and a half later, and the second `auth_unavailable` row in `Log` is
+   that retry. Rename the tab back and the next call succeeds.
+
+Steps 1–5 are all outside-the-system observations: the browser shows the screen,
+the Sheet shows the rows. Nothing here is verified by a tool reporting its own
+success.
+
+### Known issues
+
+- `Log` volume during an outage: every refused `api_*` call writes an
+  `auth_unavailable` row, and an app in use makes several calls per action. That
+  is the ticket's requirement (the distinction has to survive into the Log) and
+  the rows are what make an outage legible, but a long outage will be noisy.
+- The retry is one attempt, not a backoff. A failure lasting longer than about a
+  second and a half still reaches the user — with the right message and a
+  working reload, which is the whole point.
+- `getSettings_` is unchanged in TTL, per the ticket's out-of-scope list, so a
+  cache that fails only on write will re-read the `Settings` tab on every call
+  while it is down. Correct, just slower.
+

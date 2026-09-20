@@ -467,7 +467,10 @@ function writeServerBackup_(content) {
 function requireUpdaterOwner_() {
   var access = requireAccess_();
   if (!access.allowed) {
-    throw ksError_('ACCESS_DENIED', 'This Google account is not on the Keystone access list.');
+    // An unreadable Users tab is not a refusal (ticket 006): it carries its own
+    // code so the dialog says "try again", not "you are not on the list".
+    var refusal = accessError_(access);
+    throw ksError_(refusal.code, refusal.message);
   }
   if (access.role !== 'owner') {
     throw ksError_('FORBIDDEN', 'Only the owner can update the server code.');

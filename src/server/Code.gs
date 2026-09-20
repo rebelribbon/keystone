@@ -110,22 +110,62 @@ function resolveChannel_(params) {
 }
 
 /**
- * Pure. The authorize/deny decision. An empty email (Apps Script could not
- * resolve the account) and an email with no `Users` row are both denied.
+ * Pure. The access decision, in three outcomes (ticket 006 §2).
+ *
+ *   status 'ok'          — allowed, with a role.
+ *   status 'denied'      — the `Users` tab was read and this account is not on
+ *                          it, or there is no account at all. A real answer.
+ *   status 'unavailable' — the `Users` tab could not be read. Not an answer.
+ *                          Never render it as a denial: the person reads "you
+ *                          are not on the access list", goes to the Sheet,
+ *                          finds their row where it belongs, and has nothing
+ *                          left to try.
+ *
+ * `roleResult` is the tri-state from `getUserRole_`. Anything else — a bare
+ * role string, a null left over from an older call site — is treated as
+ * `unavailable`, not as a denial: a caller that did not hand over an answer has
+ * not established that there isn't one.
  * @param {string} email
- * @param {?string} role
- * @return {{allowed: boolean, email: string, role: ?string, code: ?string, reason: string}}
+ * @param {?Object} roleResult
+ * @return {{allowed: boolean, status: string, email: string, role: ?string, code: ?string, reason: string}}
  */
-function decideAccess_(email, role) {
+function decideAccess_(email, roleResult) {
   var normalized = String(email == null ? '' : email).trim().toLowerCase();
   if (!normalized) {
-    return { allowed: false, email: '', role: null, code: 'ACCESS_DENIED', reason: 'no_email' };
+    return {
+      allowed: false, status: 'denied', email: '', role: null,
+      code: 'ACCESS_DENIED', reason: 'no_email'
+    };
   }
-  var normalizedRole = String(role == null ? '' : role).trim().toLowerCase();
-  if (KS_VALID_ROLES.indexOf(normalizedRole) === -1) {
-    return { allowed: false, email: normalized, role: null, code: 'ACCESS_DENIED', reason: 'not_listed' };
-  }
-  return { allowed: true, email: normalized, role: normalizedRole, code: null, reason: 'ok' };
+
+  var unavailable = function (reason) {
+    return {
+      allowed: false, status: 'unavailable', email: normalized, role: null,
+      code: 'AUTH_UNAVAILABLE', reason: String(reason || 'users_read_failed')
+    };
+  };
+  var denied = function (reason) {
+    return {
+      allowed: false, status: 'denied', email: normalized, role: null,
+      code: 'ACCESS_DENIED', reason: String(reason || 'not_listed')
+    };
+  };
+
+  if (!roleResult || typeof roleResult !== 'object') return unavailable('no_role_result');
+
+  var status = String(roleResult.status == null ? '' : roleResult.status).trim().toLowerCase();
+  if (status === 'unavailable') return unavailable(roleResult.reason);
+  if (status === 'denied') return denied(roleResult.reason);
+  if (status !== 'ok') return unavailable('unknown_role_status');
+
+  var normalizedRole = String(roleResult.role == null ? '' : roleResult.role).trim().toLowerCase();
+  // A listed row carrying a role we do not grant is still a read answer.
+  if (KS_VALID_ROLES.indexOf(normalizedRole) === -1) return denied('invalid_role');
+
+  return {
+    allowed: true, status: 'ok', email: normalized, role: normalizedRole,
+    code: null, reason: 'ok'
+  };
 }
 
 /**
@@ -267,12 +307,11 @@ function tagFromManifest_(body) {
  * @return {string}
  */
 function fetchNewestTag_(assetBaseUrl) {
-  var cache = CacheService.getScriptCache();
-  var hit = cache.get(KS_TAGS_CACHE_KEY);
+  var hit = cacheGet_(KS_TAGS_CACHE_KEY);
   if (hit) {
     var cachedTag = String(hit).trim();
     if (/^build-\d+$/.test(cachedTag)) return cachedTag;
-    cache.remove(KS_TAGS_CACHE_KEY);
+    cacheRemove_(KS_TAGS_CACHE_KEY);
   }
 
   var url = manifestUrl_(assetBaseUrl);
@@ -280,7 +319,7 @@ function fetchNewestTag_(assetBaseUrl) {
   if (response.getResponseCode() !== 200) return '';
 
   var tag = tagFromManifest_(response.getContentText());
-  if (tag) cache.put(KS_TAGS_CACHE_KEY, tag, KS_TAGS_CACHE_TTL_SECONDS);
+  if (tag) cachePut_(KS_TAGS_CACHE_KEY, tag, KS_TAGS_CACHE_TTL_SECONDS);
   return tag;
 }
 
@@ -364,15 +403,11 @@ function activeEmail_() {
 function doGet(e) {
   var params = (e && e.parameter) ? e.parameter : {};
 
-  var email = activeEmail_();
-  var role = null;
-  try {
-    role = getUserRole_(email);
-  } catch (err) {
-    role = null;
+  var access = requireAccess_();
+  if (access.status === 'unavailable') {
+    logRow_(access.email, 'auth_unavailable', '', 'reason=' + access.reason);
+    return renderUnavailableScreen_(access.reason);
   }
-
-  var access = decideAccess_(email, role);
   if (!access.allowed) {
     logRow_(access.email, 'access_denied', '', 'reason=' + access.reason);
     return renderAccessScreen_(access.email);
@@ -464,7 +499,7 @@ function bundleCacheKey_(tag, file, index) {
 
 /**
  * Fetch one client bundle server-side, base64-encode it, and chunk it into
- * CacheService (6 h TTL) so it survives the per-key size cap. Returns the
+ * the script cache (6 h TTL) so it survives the per-key size cap. Returns the
  * chunks. This is the §2.1 gate 1 fallback, reached only when the Settings key
  * `loader_mode` is `inline`.
  *
@@ -479,12 +514,8 @@ function api_getBundle(tag, file) {
   // Making this callable by google.script.run also makes it reachable by any
   // signed-in Google account, so it needs the same gate as the rest of the API
   // and its two arguments must not be able to steer the fetch anywhere else.
-  var access = decideAccess_(activeEmail_(), (function () {
-    try { return getUserRole_(activeEmail_()); } catch (err) { return null; }
-  })());
-  if (!access.allowed) {
-    return { code: 'ACCESS_DENIED', message: 'This Google account is not on the Keystone access list.' };
-  }
+  var access = requireAccess_();
+  if (!access.allowed) return accessError_(access);
   if (!/^build-\d+$/.test(String(tag == null ? '' : tag).trim())) {
     return { code: 'BAD_REQUEST', message: 'tag must be a build-<number> release tag.' };
   }
@@ -492,15 +523,14 @@ function api_getBundle(tag, file) {
     return { code: 'BAD_REQUEST', message: 'file must be one of the published client bundles.' };
   }
 
-  var cache = CacheService.getScriptCache();
   var countKey = bundleCacheKey_(tag, file, 'count');
-  var countHit = cache.get(countKey);
+  var countHit = cacheGet_(countKey);
 
   if (countHit) {
     var total = parseInt(countHit, 10);
     var keys = [];
     for (var i = 0; i < total; i++) keys.push(bundleCacheKey_(tag, file, i));
-    var found = cache.getAll(keys) || {};
+    var found = cacheGetAll_(keys);
     var cachedChunks = [];
     var complete = true;
     for (var j = 0; j < total; j++) {
@@ -525,8 +555,12 @@ function api_getBundle(tag, file) {
   var chunks = splitChunks_(encoded, KS_BUNDLE_CHUNK_CHARS);
   var writes = {};
   for (var k = 0; k < chunks.length; k++) writes[bundleCacheKey_(tag, file, k)] = chunks[k];
-  cache.putAll(writes, KS_BUNDLE_CACHE_TTL_SECONDS);
-  cache.put(countKey, String(chunks.length), KS_BUNDLE_CACHE_TTL_SECONDS);
+  // Best effort: a bundle that does not cache is refetched next time, which is
+  // slow, not broken. The count key is written only if the chunks landed, so a
+  // partial write can never be read back as a complete bundle.
+  if (cachePutAll_(writes, KS_BUNDLE_CACHE_TTL_SECONDS)) {
+    cachePut_(countKey, String(chunks.length), KS_BUNDLE_CACHE_TTL_SECONDS);
+  }
 
   return { ok: true, tag: tag, file: file, total: chunks.length, chunks: chunks };
 }
@@ -626,6 +660,25 @@ function renderAccessScreen_(email) {
     signedIn,
     '<p class="quiet">Ask the owner to add this address to the Users tab of the Keystone Index sheet. ',
     'If you have more than one Google account, check that you are in the right one.</p>'
+  ].join(''));
+}
+
+/**
+ * The screen for an access check that could not be completed (ticket 006 §3).
+ *
+ * It does not mention the access list, because that is not what happened. The
+ * reason string is shown small and verbatim so the owner can act on the actual
+ * failure instead of the most likely-sounding one.
+ * @param {string} reason
+ * @return {!HtmlOutput}
+ */
+function renderUnavailableScreen_(reason) {
+  var detail = String(reason == null ? '' : reason).trim();
+  return renderStandaloneScreen_('Keystone could not check access right now', [
+    '<p>Something went wrong reading the access list, so this page cannot tell ',
+    'whether this account is allowed in. Nothing has changed about your access.</p>',
+    '<p>Try again in a moment.</p>',
+    detail ? '<p class="quiet">Reported: ' + escapeHtml_(detail) + '</p>' : ''
   ].join(''));
 }
 

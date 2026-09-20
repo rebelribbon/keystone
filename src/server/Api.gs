@@ -16,9 +16,9 @@
 var KS_UPLOAD_TTL_SECONDS = 21600;
 
 /**
- * The largest chunk one CacheService key will hold, in characters.
+ * The largest chunk one script-cache key will hold, in characters.
  *
- * CacheService caps a value at 100 KB. The client's ladder starts at 1.5 MB
+ * The script cache caps a value at 100 KB. The client's ladder starts at 1.5 MB
  * (SPEC §6.4) and halves on rejection, so the first four rungs are refused
  * immediately and it settles on the 100 KB floor. Rejecting with a named code
  * is what lets the client act rather than fail opaquely.
@@ -95,18 +95,42 @@ function isDownloadKeyBase_(cacheKeyBase, buildId) {
  * ---------------------------------------------------------------------- */
 
 /**
- * Resolve the caller and refuse anyone without a Users row.
- * @return {{allowed: boolean, email: string, role: ?string}}
+ * Resolve the caller's access decision. Never throws, and never turns an
+ * unreadable `Users` tab into a denial (ticket 006).
+ * @return {{allowed: boolean, status: string, email: string, role: ?string, code: ?string, reason: string}}
  */
 function requireAccess_() {
   var email = activeEmail_();
-  var role = null;
+  var roleResult;
   try {
-    role = getUserRole_(email);
+    roleResult = getUserRole_(email);
   } catch (err) {
-    role = null;
+    // getUserRole_ already swallows its own failures; this is the belt to that
+    // braces. A throw from here is still not evidence about the access list.
+    roleResult = { status: 'unavailable', role: null, reason: describeError_(err) };
   }
-  return decideAccess_(email, role);
+  return decideAccess_(email, roleResult);
+}
+
+/**
+ * The structured error for a refused access decision (SPEC §14.2).
+ *
+ * `AUTH_UNAVAILABLE` is deliberately a different code from `ACCESS_DENIED`: the
+ * client retries the first and surfaces the second, and a reader of the Log can
+ * tell an outage from a wall of genuine denials.
+ * @param {!Object} access
+ * @return {?{code: string, message: string}} null when access is allowed
+ */
+function accessError_(access) {
+  if (access && access.allowed) return null;
+  if (access && access.status === 'unavailable') {
+    return {
+      code: 'AUTH_UNAVAILABLE',
+      message: 'Keystone could not check the access list just now. Try again in a moment. ' +
+        'Reported: ' + String(access.reason || 'unknown')
+    };
+  }
+  return { code: 'ACCESS_DENIED', message: 'This Google account is not on the Keystone access list.' };
 }
 
 /**
@@ -115,14 +139,12 @@ function requireAccess_() {
  * @return {*}
  */
 function apiCall_(body) {
-  var access;
-  try {
-    access = requireAccess_();
-  } catch (err) {
-    return { code: 'INTERNAL', message: 'Could not resolve the signed-in account.' };
-  }
+  var access = requireAccess_();
   if (!access.allowed) {
-    return { code: 'ACCESS_DENIED', message: 'This Google account is not on the Keystone access list.' };
+    if (access.status === 'unavailable') {
+      logRow_(access.email, 'auth_unavailable', '', 'reason=' + access.reason);
+    }
+    return accessError_(access);
   }
   try {
     return body(access);
@@ -195,11 +217,18 @@ function api_beginSave(buildId, meta) {
   return apiCall_(function (access) {
     var id = String(buildId == null ? '' : buildId).trim() || newBuildId_();
     var uploadId = newUploadId_();
-    CacheService.getScriptCache().put(
+    // The upload cache is the store for a save in progress, not an
+    // optimization over one, so a write that does not land is reported rather
+    // than swallowed: the alternative is a save that looks fine until commit
+    // and then reports missing chunks.
+    var staged = cachePut_(
       uploadMetaKey_(uploadId),
       JSON.stringify({ buildId: id, meta: meta || {}, email: access.email, startedAt: new Date().toISOString() }),
       KS_UPLOAD_TTL_SECONDS
     );
+    if (!staged) {
+      throw ksError_('CACHE_WRITE_FAILED', 'The upload could not be opened because the script cache refused the write.');
+    }
     return { uploadId: uploadId, buildId: id };
   });
 }
@@ -221,11 +250,12 @@ function api_saveChunk(uploadId, index, base64) {
           ' character cache limit. Halve the chunk size and retry.'
       );
     }
-    var cache = CacheService.getScriptCache();
-    if (!cache.get(uploadMetaKey_(uploadId))) {
+    if (!cacheGet_(uploadMetaKey_(uploadId))) {
       throw ksError_('UPLOAD_EXPIRED', 'This upload is unknown or has expired. Start the save again.');
     }
-    cache.put(uploadChunkKey_(uploadId, index), text, KS_UPLOAD_TTL_SECONDS);
+    if (!cachePut_(uploadChunkKey_(uploadId, index), text, KS_UPLOAD_TTL_SECONDS)) {
+      throw ksError_('CACHE_WRITE_FAILED', 'Chunk ' + index + ' could not be staged because the script cache refused the write.');
+    }
     return { ok: true };
   });
 }
@@ -240,8 +270,7 @@ function api_saveChunk(uploadId, index, base64) {
  */
 function api_commitSave(uploadId, totalChunks, thumbBase64) {
   return apiCall_(function (access) {
-    var cache = CacheService.getScriptCache();
-    var raw = cache.get(uploadMetaKey_(uploadId));
+    var raw = cacheGet_(uploadMetaKey_(uploadId));
     if (!raw) {
       throw ksError_('UPLOAD_EXPIRED', 'This upload is unknown or has expired. Start the save again.');
     }
@@ -252,7 +281,7 @@ function api_commitSave(uploadId, totalChunks, thumbBase64) {
 
     var keys = [];
     for (var i = 0; i < count; i++) keys.push(uploadChunkKey_(uploadId, i));
-    var found = cache.getAll(keys) || {};
+    var found = cacheGetAll_(keys);
     var parts = [];
     for (var j = 0; j < count; j++) {
       var piece = found[uploadChunkKey_(uploadId, j)];
@@ -342,7 +371,6 @@ function api_commitSave(uploadId, totalChunks, thumbBase64) {
  * @param {number} total
  */
 function primeDownloadCache_(cacheKeyBase, base64, total) {
-  var cache = CacheService.getScriptCache();
   var batch = {};
   var pending = 0;
 
@@ -350,25 +378,12 @@ function primeDownloadCache_(cacheKeyBase, base64, total) {
     batch[cacheKeyBase + '_' + i] = base64.substr(i * KS_MAX_CHUNK_CHARS, KS_MAX_CHUNK_CHARS);
     pending++;
     if (pending === KS_CACHE_PUT_BATCH) {
-      putCacheBatch_(cache, batch);
+      cachePutAll_(batch, KS_DOWNLOAD_TTL_SECONDS);
       batch = {};
       pending = 0;
     }
   }
-  if (pending) putCacheBatch_(cache, batch);
-}
-
-/**
- * One batched cache write that never throws into the caller.
- * @param {!Object} cache
- * @param {!Object<string,string>} batch
- */
-function putCacheBatch_(cache, batch) {
-  try {
-    cache.putAll(batch, KS_DOWNLOAD_TTL_SECONDS);
-  } catch (err) {
-    console.error('primeDownloadCache_ batch failed, falling back to slow reads: ' + err);
-  }
+  if (pending) cachePutAll_(batch, KS_DOWNLOAD_TTL_SECONDS);
 }
 
 /**
@@ -419,12 +434,7 @@ function api_loadChunk(buildId, index, cacheKeyBase) {
     var idx = Number(index) || 0;
 
     if (isDownloadKeyBase_(cacheKeyBase, buildId)) {
-      var hit = null;
-      try {
-        hit = CacheService.getScriptCache().get(cacheKeyBase + '_' + idx);
-      } catch (err) {
-        hit = null;
-      }
+      var hit = cacheGet_(cacheKeyBase + '_' + idx);
       if (hit !== null && hit !== undefined) {
         return { chunk: hit, cached: true };
       }
@@ -442,15 +452,11 @@ function api_loadChunk(buildId, index, cacheKeyBase) {
 
     // Re-populate only the key that missed; re-priming the whole build here
     // would turn one slow read into one slow read plus a full cache rewrite.
-    try {
-      CacheService.getScriptCache().put(
-        downloadKeyBase_(row.build.buildId, row.build.updated) + '_' + idx,
-        chunk,
-        KS_DOWNLOAD_TTL_SECONDS
-      );
-    } catch (err) {
-      console.error('api_loadChunk re-populate failed: ' + err);
-    }
+    cachePut_(
+      downloadKeyBase_(row.build.buildId, row.build.updated) + '_' + idx,
+      chunk,
+      KS_DOWNLOAD_TTL_SECONDS
+    );
 
     return { chunk: chunk, cached: false };
   });
@@ -478,7 +484,7 @@ function api_devEvictChunk(cacheKeyBase, index) {
       throw ksError_('BAD_REQUEST', 'cacheKeyBase must be a download cache key base.');
     }
     var idx = Number(index) || 0;
-    CacheService.getScriptCache().remove(base + '_' + idx);
+    cacheRemove_(base + '_' + idx);
     return { ok: true, evicted: idx };
   });
 }
