@@ -1,7 +1,7 @@
 # Phase 0 verification gates — results
 
-The six gates from SPEC §2.1. Five pass. Only gate 6 (the updater, ticket 004)
-is outstanding.
+The six gates from SPEC §2.1. **All six pass.** Every one was run against a
+deployed web app, not a local harness.
 
 | Gate | Result | Measured | Notes |
 |---|---|---|---|
@@ -10,12 +10,14 @@ is outstanding.
 | 3 — Round-trip | **PASS** | 5,242,880 bytes, digests match | 5 MB saved to Drive gzip + chunked and loaded back byte-identical. Load 518.9 s → 48.3 s after ticket 005. Detail below. |
 | 4 — Storage | **PASS** | read-back byte-identical | IndexedDB works inside the deployed iframe, so the thumbnail cache does not need the memory fallback. |
 | 5 — Release | **PASS** | `build-4` | Merging to `main` tags a build, the `release` branch carries `dist/`, and jsDelivr serves it with no manual step. |
-| 6 — Updater | pending — ticket 004 live run | | Sheet menu *Keystone → Update server code* writes `dist/server/*` from a tag, creates a version, and repoints the test deployment. Code landed in ticket 004; the owner's live run fills this row. See below. |
+| 6 — Updater | **PASS** | `build-12` written, version 23, 12.2 s | Sheet menu *Keystone → Update server code* wrote all six `dist/server/*` files, created a version, and repointed the test deployment. Nobody opened the Apps Script editor. Detail below. |
 
 Gates 1, 2, 4, 5 were run at 2026-09-18T23:05:42.749Z on tag `build-4`.
 Gate 3 was first run at 2026-09-19T16:54:39Z on tag `build-6` and re-run twice
 at 2026-09-19T22:39:00Z and 2026-09-19T22:43:08Z on tag `build-9` after ticket
-005. All on the **stable** channel.
+005. Those five were all on the **stable** channel. Gate 6 ran at
+2026-09-20T00:34:44Z and wrote `build-12` to the **test** channel, which is what
+that gate does.
 
 Gate 1 came in at 109 ms against a 6000 ms budget — roughly 55x headroom. That
 is the loader and the Phase 0 cube only; the real engine arrives in Phase 1.
@@ -112,50 +114,121 @@ the miss itself; the rest is run-to-run variance — the warm median moved 542 �
 a distribution, so treat the gap as "one miss plus noise," not a measured
 eviction penalty of 9 s.
 
-## Which channel these were run on
+## Gate 6 — the updater, in detail
 
-**All five passing gates were verified on the stable deployment.** At the time
-gates 1, 2 and 4 were run there was no usable test channel: the `/dev` URL
-returns a Google Drive error page whenever the owner is signed into more than
-one Google account, because Google rewrites the path to `/macros/u/N/s/...` and
-the request never reaches `doGet`.
-
-ADR 0001 removed `/dev` from the deployment model in response. The test channel
-is now a second versioned `/exec` deployment selected by `?c=test`. Nothing in
-the results above depends on the channel — they exercise the loader, the
-renderer, the browser sandbox, and the Drive round trip, none of which differ
-between the two — and the tag-resolution difference that does differ is what
-gate 5 covers.
-
-Gate 6 is the exception by design: it is the first gate that must be run on
-**test**, because repointing the test deployment is what it does. Its row above
-records the channel with the rest of its figures once the owner runs it.
-
-## Gate 6 — the updater, awaiting the live run
-
-Ticket 004 landed `src/server/Updater.gs`, the two menu items, the
-`script.deployments` scope (ADR 0002), and the `testDeploymentId` /
-`stableDeploymentId` Settings keys. The Builder cannot deploy or run Apps Script
-from a cloud session, so the gate itself is the owner's to run. Fill this table
-from the completion dialog:
+Owner's run from the Sheet menu, 2026-09-20T00:34:44Z, writing tag `build-12`.
 
 | Measure | Value |
 |---|---|
-| Tag written | _pending_ |
-| Version created | _pending_ |
-| Files written | _pending_ (expect 6) |
-| Elapsed | _pending_ (the dialog reports it) |
-| Apps Script editor opened? | _pending_ (must be **no** — that is the gate) |
-| Test URL after the run | _pending_ (`?dev=gates` should show the new `server_tag`) |
-| Stable URL after the run | _pending_ (must still show the **old** `server_tag`) |
-| After *Promote to stable* | _pending_ (stable matches test) |
-| Backup file in the Builds folder | _pending_ (`server-backup-<timestamp>.json`) |
-| Channel | test, then stable on promotion |
-| Result | _pending_ |
+| Tag written | `build-12` |
+| Version created | 23 |
+| Files written | 6 |
+| Elapsed | 12.2 s |
+| Apps Script editor opened? | **No** |
+| Backup | `server-backup-2026-09-20T00-34-44-056Z.json`, written to the Builds folder **before** the write |
+| Test deployment | repointed to version 23 |
+| Stable deployment | left on its previous version |
+| Channel | test |
+| Result | **PASS** |
 
-The gate is what the fifth row says: the project's files change with nobody
-opening the Apps Script editor. Everything else on the list is there so a
-half-working run cannot be recorded as a pass.
+Fingerprint recorded in `Settings` after the write:
 
-Phase 0 closes when this table is filled in and passing. The other five gates
-are recorded above.
+```
+Api.gs:72e26fbbd121  Code.gs:2ab981bdba5e  Index.html:117af66e2fdb
+Storage.gs:0166b188f117  Updater.gs:c02e36a3b37e  appsscript.json:e239ba32b209
+```
+
+**All six digests match the ones `build-12`'s release manifest published.** That
+is the part worth keeping. The gate is not merely "the menu item ran" — the
+digests are independent evidence that the Apps Script project is executing
+exactly the bytes CI built and tagged, with no manual step anywhere in between.
+It is the first time the loader model has been demonstrated end to end for
+server code.
+
+**The gate proper is the fifth row**: the project's files changed with nobody
+opening the Apps Script editor. §2.1's gate 6 asks only for the file overwrite;
+ADR 0002 added the version and the deployment repoint, and both happened inside
+the same 12.2 s.
+
+### Not covered by this run
+
+Recorded so the gap is visible rather than assumed:
+
+- **Promotion to stable.** Stable was deliberately left on its previous version,
+  which is the designed behavior (ADR 0002 §3) — but *Promote server code to
+  stable* has not yet been run against the deployment.
+- **Backup pruning to ten.** One backup exists so far. The pruning is unit
+  tested; it has not been seen live.
+- **The deliberate-corruption check** from ticket 004's acceptance list —
+  pointing at a tag whose manifest and files disagree — was not run live, because
+  doing so means publishing a bad release. Sandbox only.
+- **A missing `testDeploymentId`.** The named-key message is unit tested and was
+  not triggered live.
+
+None of these block gate 6, which is about the write path. They are what to
+confirm the next time the updater is used in anger.
+
+### What gate 6 cost to get working
+
+Three defects surfaced only on the deployment, in one evening, none of them
+visible from the repo:
+
+1. **`script.container.ui` missing from the manifest.** SPEC §2.2's scope list
+   omits it. Every Sheet menu dialog failed — including ticket 002's *Open test
+   URL*, broken since 002 and never noticed because both URLs were reachable from
+   bookmarks. Fixed in `build-11`; flagged for the Architect as a §2.2 correction.
+2. **The Google Drive API not enabled on the standard Cloud project.** ADR 0002's
+   move off the default Cloud project turned off every API the hidden project had
+   been auto-enabling. `DriveApp` threw on a folder the owner could open in a
+   browser.
+3. **An error message that guessed.** That Drive failure was reported as *"the
+   Settings key builds_folder_id does not name a Drive folder this account can
+   open"* — a `catch` block asserting a cause it had never checked, which sent the
+   diagnosis after the wrong thing. Fixed in `build-12`, along with a *Diagnose
+   access* menu item that reports granted scopes and one probe per service
+   instead of offering a theory.
+
+`docs/SETUP.md` gained steps 6b–6f as a result: create the Cloud project,
+configure the consent screen, add every user as a Cloud test user, enable the
+Apps Script **and** Drive APIs separately, then the per-account Apps Script API
+toggle. None existed while Keystone used the default Cloud project, which is
+exactly why nobody knew they were needed.
+
+## Which channel each gate was verified on
+
+**Gates 1–5 ran on the stable deployment.** When gates 1, 2 and 4 were run there
+was no usable test channel: the `/dev` URL returns a Google Drive error page
+whenever the owner is signed into more than one Google account, because Google
+rewrites the path to `/macros/u/N/s/...` and the request never reaches `doGet`.
+
+ADR 0001 removed `/dev` from the deployment model in response. The test channel
+is now a second versioned `/exec` deployment selected by `?c=test`. Nothing in
+gates 1–5 depends on the channel — they exercise the loader, the renderer, the
+browser sandbox, and the Drive round trip, none of which differ between the two —
+and the tag-resolution difference that does differ is what gate 5 covers.
+
+**Gate 6 ran on test**, by design: repointing the test deployment is what it
+does. Stable was left untouched, which is the property that makes a bad server
+push survivable.
+
+| Gate | Channel | Tag | When |
+|---|---|---|---|
+| 1 — Loader | stable | `build-4` | 2026-09-18T23:05:42.749Z |
+| 2 — Texture | stable | `build-4` | 2026-09-18T23:05:42.749Z |
+| 3 — Round-trip | stable | `build-6`, re-run twice on `build-9` | 2026-09-19T16:54:39Z, 22:39:00Z, 22:43:08Z |
+| 4 — Storage | stable | `build-4` | 2026-09-18T23:05:42.749Z |
+| 5 — Release | stable | `build-4` | 2026-09-18T23:05:42.749Z |
+| 6 — Updater | test | wrote `build-12` | 2026-09-20T00:34:44Z |
+
+## Phase 0 is verified
+
+All six gates pass on a deployed web app. The loader serves client bundles from
+jsDelivr at a pinned tag; textures and repo assets load without CORS trouble; a
+5 MB build round-trips to Drive byte-identical in under a minute each way;
+IndexedDB works inside the `HtmlService` iframe; merging to `main` tags a release
+with no manual step; and server code now reaches the Apps Script project through
+a menu item instead of a clipboard.
+
+What remains for Phase 0's definition of done (SPEC §16) is not a gate: the
+`v0.0.0` tag is the owner's to cut, and `docs/reviews/phase-0.md` is the
+Architect's to write. Ticket 004 puts both out of scope deliberately.

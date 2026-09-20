@@ -324,3 +324,29 @@ id.
 **The general rule now pinned by tests:** a message may state what was attempted
 and what came back. It may state a cause only when it verified one, or when the
 hypothesis is labelled and follows the verbatim response.
+
+### Gate 6: PASSED on the deployment
+
+Owner's run, 2026-09-20T00:34:44Z. `build-12` written, **6 files, version 23,
+12.2 s**, backup `server-backup-2026-09-20T00-34-44-056Z.json` written to the
+Builds folder first, test deployment repointed to version 23, stable left on its
+previous version. **Nobody opened the Apps Script editor** — that is the gate.
+
+The recorded fingerprint's six digests all match what `build-12`'s release
+manifest published, so the project is provably executing the bytes CI built and
+tagged. Full transcription in `docs/PHASE0_RESULTS.md`, which is now closed out:
+all six gates, each with the channel it was verified on.
+
+**Still unexercised on the deployment**, recorded rather than assumed: promotion
+to stable, backup pruning to ten, the deliberate-corruption check (it would mean
+publishing a bad release), and the missing-`testDeploymentId` message. All four
+are unit tested. None is part of gate 6's write path.
+
+**What it cost to get here.** Three defects that no test in the repo could have
+reached, because all three lived in Google configuration rather than in code:
+the `script.container.ui` scope missing from SPEC §2.2's list; the Drive API not
+enabled on the standard Cloud project after ADR 0002 moved off the default one;
+and one of my own error messages asserting a cause it had never checked, which
+cost more than the defect it was describing. The first is flagged for the
+Architect, the second and third are fixed, and `docs/SETUP.md` now carries steps
+6b–6f so the next person does not rediscover any of it.

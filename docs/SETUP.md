@@ -6,7 +6,9 @@ Do the steps in order. Where a step says *copy the ID*, paste it somewhere
 temporary — you will put it into the Settings tab in step 9. Those IDs never go
 into this repository; the repo is public.
 
-Budget about 30 minutes the first time.
+Budget about 45 minutes the first time. Steps 6b–6f are Google Cloud console
+work that only exists because Keystone uses a standard Cloud project (ADR 0002);
+they are one-time, and the updater pays them back on every server change after.
 
 ---
 
@@ -148,17 +150,110 @@ list does not mention it; see the troubleshooting entry below.
 
 ---
 
-## 6b. Turn on the Apps Script API
+## 6b. Create the Cloud project and link the script to it
 
-The updater writes to this project through the Apps Script API, and that API is
-off by default for every Google account.
+Every Apps Script project runs against a Google Cloud project. By default that is
+a hidden one Google creates for you, with the consent screen pre-filled and every
+API the script touches already switched on — which is why none of the next four
+steps existed before.
+
+ADR 0002 moved Keystone to a **standard** Cloud project, because the Apps Script
+API cannot be used from the default one. A standard project auto-enables nothing.
+Everything the hidden project did for you, you now do once, by hand. Skipping any
+of steps 6b–6e produces a failure that looks like something else entirely.
+
+1. Go to <https://console.cloud.google.com/projectcreate>.
+2. Name it `Keystone`. Create it, then **copy the project number** — the long
+   digit string on the project's dashboard, not the project ID.
+3. Back in the Apps Script editor: gear (**Project Settings**) → *Google Cloud
+   Platform (GCP) Project* → **Change project** → paste the project number →
+   **Set project**.
+
+**Changing the Cloud project revokes every existing authorization.** That is
+expected. You will re-authorize at step 7.
+
+---
+
+## 6c. Configure the OAuth consent screen
+
+Without this, authorization fails before it starts.
+
+1. In the Cloud console, go to **Google Auth Platform → Branding**.
+2. Fill in the app name (`Keystone`), the user support email, and the developer
+   contact email. Your own address is fine for both.
+3. Save.
+
+You will see *Google hasn't verified this app* when you authorize. That is
+correct and expected — it is your own script, used by your own family, and
+verification is for apps published to strangers.
+
+---
+
+## 6d. Add every Keystone user as a test user
+
+**This is the step most likely to bite you later, because it fails for other
+people and not for you.**
+
+1. **Google Auth Platform → Audience**.
+2. Under *Test users*, **+ Add users**.
+3. Add your own address **and the address of every family member who will ever
+   open Keystone**.
+
+While the app is in Testing mode, an account that is not on this list cannot
+authorize it at all. They do not get Keystone's access screen — they get a
+Google error before your code runs, so nothing appears in the `Log` tab and
+`?dev=gates` has nothing to show.
+
+### Access control is now two lists, and they must agree
+
+| List | Where | What it controls |
+|---|---|---|
+| **Cloud test users** | Google Auth Platform → Audience | whether Google will let the account authorize the script at all |
+| **`Users` tab** | the Keystone Index sheet | whether Keystone lets the account in, and with which role |
+
+Adding someone to one and not the other is a half-grant, and the two halves fail
+in completely different ways:
+
+- **In `Users`, not a test user** → a Google authorization error. Your code never
+  runs. Nothing is logged.
+- **A test user, not in `Users`** → Keystone's own access screen, naming the
+  address it saw. This one is logged as `access_denied`.
+
+Adding a family member means both lists, every time. Removing someone means both
+lists too.
+
+---
+
+## 6e. Enable the APIs the script calls
+
+A standard Cloud project starts with everything off. Each API is enabled
+separately — enabling one does not enable the other.
+
+1. **APIs & Services → Library** in the Cloud console.
+2. Search **Apps Script API** → **Enable**. The updater writes the project's
+   files and creates versions through it.
+3. Search **Google Drive API** → **Enable**. `DriveApp` needs it for build files
+   and the updater's backups.
+
+Miss the Drive one and `DriveApp` throws on a folder you can open perfectly well
+in a browser, which reads like a wrong folder id and is not. Miss the Apps Script
+one and *Update server code* fails with a 403. If either happens, run
+**Keystone → Diagnose access…** rather than guessing (step 13).
+
+Any API a future ticket calls has to be enabled here the same way.
+
+---
+
+## 6f. Turn on the Apps Script API for your account
+
+Separate switch from step 6e, and both are required. Step 6e enables the API
+**on the Cloud project**; this one enables it **for your Google account**.
 
 1. Go to <https://script.google.com/home/usersettings>.
 2. Switch **Google Apps Script API** to **On**.
 
-This is a per-account setting, not a per-project one, so you do it once. Skipping
-it does not break anything now; it makes *Update server code* fail later with a
-403 and a message pointing back at this page.
+Per-account, so you do it once no matter how many projects you own. Skipping it
+makes *Update server code* fail with a 403 that names this page.
 
 ---
 
@@ -284,6 +379,12 @@ Settings are cached for 5 minutes, so a change can take that long to take effect
 Use the address of the Google account you will actually browse with. Anyone not
 listed here gets the access screen. Add family members later with role `editor`
 or `viewer`.
+
+**And add them as Cloud test users at the same time** (step 6d). These are two
+separate lists that both have to include a person before they can use Keystone,
+and they fail differently when they disagree: missing from `Users` gives them
+Keystone's access screen, missing from the test-user list gives them a Google
+authorization error before any Keystone code runs at all.
 
 ---
 
@@ -436,6 +537,13 @@ the default:
 Deleting the `/u/N/` part by hand usually does not stick — Google puts it back.
 Changing which account is the default is what actually holds.
 
+**A family member gets a Google error before Keystone loads at all.**
+They are not a Cloud test user (step 6d). While the app is in Testing mode Google
+refuses the authorization before your code runs, so there is no `Log` row and
+nothing to see in `?dev=gates` — the absence of any trace is how you tell this
+apart from Keystone's own access screen. Add them under **Google Auth Platform →
+Audience**, and check they are in the `Users` tab too.
+
 **"This account does not have access."**
 The signed-in address is not in `Users`, or it does not match exactly. The screen
 prints the address it saw — compare it with column A. If you are signed into
@@ -485,6 +593,14 @@ that is the check doing its job.
 `testDeploymentId` is empty in `Settings`. The files and the version were still
 written, so fill the key in from *Deploy → Manage deployments* and run the update
 again — it is safe to repeat.
+
+**Drive works in the browser but `DriveApp` throws in the script.**
+The **Google Drive API** is probably not enabled on the Cloud project (step 6e).
+It is a separate switch from the Apps Script API, and a standard Cloud project
+enables neither by default — the old hidden project did it silently, which is why
+this never happened before ADR 0002. Run **Keystone → Diagnose access…**: if
+*Drive at all* fails alongside *Builds folder*, it is the API or the scope, not
+the folder id.
 
 **"Specified permissions are not sufficient to call Ui.showModalDialog."**
 The manifest is missing `https://www.googleapis.com/auth/script.container.ui`.
