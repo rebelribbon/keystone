@@ -515,6 +515,27 @@ same broken code path is not a recovery path.
 
 ## If something goes wrong
 
+**"Access blocked: Keystone has not completed the Google verification process",
+or a URL that becomes `script.google.com/a/macros/<your-domain>/s/...`**
+
+The `/a/macros/<domain>/` shape means the browser is signed into a **Google
+Workspace** account, and that account is not on the Cloud project's OAuth
+test-user list. Google refuses it with `Error 403: access_denied` before any
+Keystone code runs, so there is no `Log` row and no `doGet` in the execution
+list.
+
+Two fixes, either one works:
+
+- Open the URL in a browser or profile signed into the **personal** Google
+  account that is already a test user, or
+- Add the Workspace address under **Google Auth Platform → Audience → Test
+  users** (step 6d) *and* to the `Users` tab (step 10). Both lists, as always.
+
+This is not a deployment problem, and it hits the stable and test URLs exactly
+the same way. ADR 0004 records the investigation: the whole project believed the
+test deployment was broken because every test-URL attempt happened in the work
+browser and every stable-URL attempt happened in the personal one.
+
 **A Google Drive error page: "Sorry, unable to open the file at this time."**
 
 You are signed into more than one Google account. Google rewrites the web app
@@ -525,6 +546,10 @@ answers instead of the script.
 It looks exactly like a broken deployment, but it is not: the request never
 reaches your script, so **the Apps Script execution log shows no `doGet` run at
 all.** That absence is how you tell this apart from a real server error.
+
+This is a **different** failure from the Workspace one above — a different
+rewrite (`/u/N/` rather than `/a/macros/<domain>/`) and a different error page.
+Check which rewrite the address bar shows before deciding which fix applies.
 
 Fix it by making the request come from a browser where the Keystone account is
 the default:

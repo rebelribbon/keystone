@@ -105,12 +105,13 @@ Audit the existing acceptance history against this rule as part of this ticket a
 
 ### Status
 
-**Parts C and D are done. Parts A and B are not started** — Part A is an
-owner-driven investigation and I have given the owner the collection sheet.
-`docs/decisions/0004-test-deployment-finding.md` does not exist yet and is the
-next thing written when the evidence arrives. Two acceptance items therefore
-remain open, and they are named at the end of this Handoff rather than quietly
-left unticked.
+**Parts A, C and D are done. Part B is skipped**, because Part A found no
+defect to work around.
+
+Part A's finding: **the test deployment was never broken.** Both deployments are
+configured identically and behave identically; the failures were a Google
+account authorization block that hit either URL. Written up as
+`docs/decisions/0004-test-deployment-finding.md` with the evidence.
 
 ### Part C — what changed
 
@@ -198,17 +199,76 @@ in `CLAUDE.md` does not prevent that; what prevents it is the check being
 written so it cannot be satisfied any other way — "open the URL and screenshot
 the address bar" rather than "the test URL serves the newest tag".
 
+### The strongest case is the one Part A just produced, and the rule does not cover it
+
+Every entry above is "an outside observation was owed and an inside one was
+substituted". Part A's finding is worse than that:
+
+**The outside observation was taken. Someone opened both URLs in a browser and
+watched what happened. It still produced a confident wrong conclusion, held for
+the entire project, across three tickets and two ADRs.**
+
+It failed because the two observations were made under different conditions and
+compared as though they were not: every test-URL attempt in the work browser,
+every stable-URL attempt in the personal one. One variable appeared to differ
+(the deployment). A different one actually did (the signed-in account). The
+comparison changed both at once, so it could not have isolated either.
+
+That is a different failure mode from the other fourteen, and it is more
+expensive, because "no conclusion" prompts another look while "wrong conclusion"
+closes the question. ADR 0001 was written on it, ticket 009 Part B was designed
+around it, and three tickets carried an acceptance check that could never pass.
+
+**The rule in `CLAUDE.md` does not catch this.** It is satisfied — the check
+observed from outside. I have not amended it, because the wording came from the
+Architect verbatim in this ticket and changing it unilaterally would be the
+wrong shape of fix for a rule about rigour. The addition I would propose:
+
+> When a check compares two things, change one variable. Two observations made
+> under different conditions are not a comparison, whatever they show. Record
+> the conditions alongside the result, or the next person cannot tell whether
+> they were held constant.
+
+That, not the existing sentence, is what would have caught this in ticket 002.
+
+### Part A — what changed in the docs
+
+- `docs/decisions/0004-test-deployment-finding.md`, with the configuration
+  table, the browser-by-browser results, the root cause, and an explicit
+  statement of what the evidence does **not** establish.
+- `docs/SETUP.md` gains the `/a/macros/<domain>/` signature as its own
+  troubleshooting entry, with both fixes, and a line on the existing `/u/N/`
+  entry saying the two are different failures with different rewrites — so the
+  next person checks the address bar before picking a fix.
+
+**ADR 0001's premise is marked unsupported, not disproven**, and the distinction
+is load-bearing. The `/dev` failure was reported as `/u/N/` rewriting plus
+Drive's "unable to open the file"; what Part A found is `/a/macros/<domain>/`
+plus a 403 `access_denied`. Different rewrite, different error, different cause.
+This finding therefore does not explain the `/dev` observation — it only removes
+the evidence later taken to corroborate it, namely "the versioned test
+deployment fails too", which we now know was the account.
+
+The move to versioned `/exec` deployments still stands on its own merits
+(reproducible, pinned, and what ADR 0002's updater repoints). Only the stated
+reason is unsupported. Whether to re-test `/dev` under controlled conditions is
+the Architect's call; nothing depends on the answer.
+
 ### Still open on this ticket
 
-- `docs/decisions/0004-test-deployment-finding.md` — needs Part A's evidence.
-- Whether Part B is taken — follows from Part A.
-- The live checks for Part C: the merge-to-visible-tag timing, the purge timing
-  with and without the purge call, and the dead-`asset_base_url` fallback with
-  its banner. All three need the deployment and all three are exactly the kind
-  of outside observation Part D is about, so none of them will be ticked from a
-  unit test.
-- `docs/SETUP.md`'s deployment topology and its `/dev` explanation are
-  **deliberately untouched.** That text attributes the test channel's failure to
-  `/dev` plus multi-account sign-in, which is ADR 0001's premise — the premise
-  this ticket says is falsified. Rewriting it before Part A's finding would mean
-  replacing one wrong explanation with another guess.
+The three live checks for Part C, all of which need the deployment and none of
+which will be ticked from a unit test:
+
+- the merge-to-visible-tag timing (should be inside 60 s);
+- the purge timing, with and without the purge call;
+- the dead-`asset_base_url` fallback showing the banner and naming its source.
+
+The second one is the one that matters: ADR 0003 calls the purge assumption
+unverified and says this ticket verifies it before anything depends on it. Until
+that measurement exists, the manifest lookup is shipped but its freshness
+guarantee is not proven. If purge turns out unreliable, ADR 0003's own fallback
+is the service-account Sheet write, which is a new ticket rather than an
+improvisation here.
+
+Run them from the **personal** browser, or add the Workspace address as a Cloud
+test user first — which is now a documented step rather than a surprise.

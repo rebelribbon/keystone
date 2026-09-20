@@ -532,3 +532,33 @@ Tests:
   outbound URL — a grep would pass on a call built from concatenated strings.
 - The boot payload's `tagSource` is asserted for all four paths: manifest,
   `stable_tag`, stable channel, and an owner `?tag=` override.
+
+## 009 follow-up — Part A: the test deployment was never broken
+
+- `docs/decisions/0004-test-deployment-finding.md`: **no test-deployment
+  defect.** Both deployments are configured identically (Web app, version 24,
+  User accessing, Anyone with a Google account) and behave identically. In the
+  Workspace-account browser **both** URLs fail with `Error 403: access_denied`
+  after Google rewrites to `script.google.com/a/macros/<domain>/s/...`; in the
+  personal-account browser **both** render the lot scene.
+- Root cause: the two-list asymmetry from the Phase 0 review. The Workspace
+  account is not on the Cloud project's OAuth test-user list, so Google refuses
+  it before any Keystone code runs — no `Log` row, no `doGet`.
+- Part B is skipped and both deployments stay. Server changes keep their
+  pre-production surface.
+- **ADR 0001's premise is marked unsupported, not disproven.** It attributed the
+  `/dev` failure to `/u/N/` rewriting plus Drive's "unable to open the file";
+  this finding is a different rewrite and a different error, so it does not
+  explain that observation — it removes the evidence later taken to corroborate
+  it. The versioned-`/exec` decision stands on other grounds.
+- `docs/SETUP.md`: the `/a/macros/<domain>/` signature as its own entry with
+  both fixes, and a note on the existing `/u/N/` entry that the two are
+  different failures — check the address bar before picking a fix.
+
+The Part D audit gains its strongest case, and it is a different shape from the
+other fourteen: **the outside observation was taken and still produced a
+confident wrong conclusion**, because every test-URL attempt happened in the
+work browser and every stable-URL attempt in the personal one. The comparison
+changed two variables at once. "No conclusion" prompts another look; "wrong
+conclusion" closes the question, and this one stayed closed for three tickets
+and two ADRs. The Handoff proposes the rule addition that would have caught it.
