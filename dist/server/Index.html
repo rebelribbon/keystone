@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <base target="_top" />
+
+    <!-- Boot payload. One JSON blob, escaped server-side by toSafeJson_ so no
+         settings or user value is ever concatenated raw into the page. -->
+    <script>window.KS_BOOT = <?!= bootJson ?>;</script>
+
+    <? if (loaderMode === 'inline') { ?>
+    <style><?!= inlineStyles ?></style>
+    <? } else { ?>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&amp;display=swap" />
+    <link rel="stylesheet" href="<?= base ?>/dist/client/styles.css" />
+    <? } ?>
+
+    <style>
+      /* Loader chrome only. Everything else comes from styles.css (SPEC §13.1). */
+      .ks-loading__title { font-size: 13px; letter-spacing: 0.14em; color: var(--survey, #0F7C8C); margin: 0; }
+      .ks-loading__files { list-style: none; margin: 4px 0 0; padding: 0; min-width: 260px; }
+      .ks-loading__file { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; }
+      .ks-loading__dot { width: 8px; height: 8px; border-radius: 999px; background: #c8d0d4; flex: none; }
+      .ks-loading__file[data-state="loaded"] .ks-loading__dot { background: var(--sage, #5E8B6A); }
+      .ks-loading__file[data-state="failed"] .ks-loading__dot { background: var(--brick, #B4432F); }
+      .ks-loading__name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .ks-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 30; padding: 8px 14px;
+        background: var(--brass, #C39A3E); color: #2b2412; font-size: 13px; line-height: 1.4; }
+      .ks-button { appearance: none; border: 0; border-radius: 999px; padding: 9px 16px; font: inherit;
+        font-size: 14px; background: var(--survey, #0F7C8C); color: #fff; cursor: pointer; }
+      .ks-gates { position: fixed; inset: 0; z-index: 40; overflow: auto; padding: 28px;
+        background: rgba(238, 241, 240, 0.96); color: var(--graphite, #27303A); }
+      .ks-gates__card { max-width: 860px; margin: 0 auto; background: var(--limewash, #fff);
+        border-radius: 14px; padding: 24px 26px; box-shadow: 0 2px 24px rgba(39, 48, 58, 0.12); }
+      .ks-gates table { border-collapse: collapse; width: 100%; font-size: 14px; margin-top: 12px; }
+      .ks-gates th, .ks-gates td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e2e7e9; vertical-align: top; }
+      .ks-gates th { font-weight: 600; font-size: 12px; letter-spacing: 0.06em; color: #5c6672; }
+      .ks-gates td.num { font-variant-numeric: tabular-nums; }
+      .ks-pass { color: var(--sage, #5E8B6A); font-weight: 600; }
+      .ks-fail { color: var(--brick, #B4432F); font-weight: 600; }
+      .ks-skip { color: #5c6672; }
+      .ks-gates__meta { font-size: 13px; color: #5c6672; margin: 0 0 4px; }
+      .ks-gates__canvas { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
+      .ks-gates__canvas canvas { border-radius: 8px; background: #dde3e5; }
+    </style>
+  </head>
+
+  <body>
+    <div id="ks-root"></div>
+
+    <div class="ks-loading" id="ks-loading">
+      <p class="ks-loading__title">KEYSTONE</p>
+      <div class="ks-loading__bar"><div class="ks-loading__bar-fill" id="ks-progress"></div></div>
+      <ul class="ks-loading__files" id="ks-files"></ul>
+      <div class="ks-loading__error" id="ks-error" hidden></div>
+    </div>
+
+    <script>
+      // Loader controller. Stores nothing in the browser: no client-side
+      // persistence of any kind (SPEC ticket 002 requirement 5).
+      var KSL = (function () {
+        var boot = window.KS_BOOT || {};
+        var files = (boot.bundles || []).slice();
+        var state = {};
+        var failed = null;
+        var bootAt = 0;
+        var firstFrameAt = 0;
+        var listEl = document.getElementById('ks-files');
+        var progressEl = document.getElementById('ks-progress');
+        var loadingEl = document.getElementById('ks-loading');
+        var errorEl = document.getElementById('ks-error');
+
+        function render() {
+          var done = 0;
+          listEl.innerHTML = '';
+          for (var i = 0; i < files.length; i++) {
+            var name = files[i];
+            var st = state[name] || 'pending';
+            if (st === 'loaded') done++;
+            var li = document.createElement('li');
+            li.className = 'ks-loading__file';
+            li.setAttribute('data-state', st);
+            var dot = document.createElement('span');
+            dot.className = 'ks-loading__dot';
+            var label = document.createElement('span');
+            label.className = 'ks-loading__name';
+            label.textContent = name;
+            li.appendChild(dot);
+            li.appendChild(label);
+            listEl.appendChild(li);
+          }
+          progressEl.style.width = files.length ? Math.round((done / files.length) * 100) + '%' : '0%';
+        }
+
+        function showBanner(text) {
+          var el = document.createElement('div');
+          el.className = 'ks-banner';
+          el.textContent = text;
+          document.body.appendChild(el);
+        }
+
+        function stopWithFailure(name) {
+          failed = name;
+          errorEl.hidden = false;
+          errorEl.innerHTML = '';
+
+          var msg = document.createElement('p');
+          msg.textContent = 'Could not load ' + name + ' from build ' + (boot.tag || '(unknown tag)') + '.';
+          errorEl.appendChild(msg);
+
+          var canRetry = boot.role === 'owner' && boot.previousTag;
+          if (canRetry) {
+            var button = document.createElement('button');
+            button.className = 'ks-button';
+            button.type = 'button';
+            button.textContent = 'Try the previous build (' + boot.previousTag + ')';
+            button.addEventListener('click', function () {
+              var url = new URL(window.location.href);
+              url.searchParams.set('tag', boot.previousTag);
+              window.location.href = url.toString();
+            });
+            errorEl.appendChild(button);
+          } else {
+            var note = document.createElement('p');
+            note.textContent = boot.previousTag
+              ? 'Ask the owner to roll back to ' + boot.previousTag + '.'
+              : 'There is no earlier build to fall back to.';
+            errorEl.appendChild(note);
+          }
+        }
+
+        return {
+          ok: function (name) {
+            if (failed) return;
+            state[name] = 'loaded';
+            render();
+          },
+          fail: function (name) {
+            if (failed) return;
+            state[name] = 'failed';
+            render();
+            stopWithFailure(name);
+          },
+          start: function () {
+            render();
+            if (boot.degraded && boot.degradedReason) {
+              // Name the source, so a degraded page says what it fell back to
+              // rather than only that something went wrong (ADR 0003).
+              showBanner(boot.degradedReason + ' Tag source: ' + (boot.tagSource || 'unknown') + '.');
+            }
+          },
+          boot: function () {
+            if (failed) return;
+            for (var i = 0; i < files.length; i++) {
+              if (state[files[i]] !== 'loaded') { stopWithFailure(files[i]); return; }
+            }
+            bootAt = performance.now();
+            try {
+              window.KS.boot({ tag: boot.tag, channel: boot.channel, user: boot.user, dev: boot.dev });
+            } catch (err) {
+              errorEl.hidden = false;
+              errorEl.textContent = 'KS.boot failed: ' + (err && err.message ? err.message : err);
+              return;
+            }
+            requestAnimationFrame(function () {
+              firstFrameAt = performance.now();
+              if (boot.devGates && window.KSGates) window.KSGates.run(boot, bootAt, firstFrameAt);
+              if (boot.devGate3 && window.KSGate3) window.KSGate3.run(boot);
+            });
+            loadingEl.hidden = true;
+            console.log('[KS] loaded', { tag: boot.tag, channel: boot.channel, base: boot.base });
+          },
+          measured: function () { return { bootAt: bootAt, firstFrameAt: firstFrameAt }; },
+          allLoaded: function () {
+            for (var i = 0; i < files.length; i++) if (state[files[i]] !== 'loaded') return false;
+            return true;
+          }
+        };
+      })();
+      KSL.start();
+    </script>
+
+    <? if (loaderMode === 'inline') { ?>
+    <!-- Gate 1 fallback: bundles fetched server-side and inlined (Settings loader_mode = inline). -->
+    <? for (var i = 0; i < inlineBundles.length; i++) { ?>
+    <script><?!= inlineBundles[i].source ?></script>
+    <script>KSL.ok(<?!= toSafeJson_(inlineBundles[i].file) ?>);</script>
+    <? } ?>
+    <? } else { ?>
+    <script defer src="<?= base ?>/dist/client/vendor-three.js" onload="KSL.ok('vendor-three.js')" onerror="KSL.fail('vendor-three.js')"></script>
+    <script defer src="<?= base ?>/dist/client/engine.js" onload="KSL.ok('engine.js')" onerror="KSL.fail('engine.js')"></script>
+    <script defer src="<?= base ?>/dist/client/catalog-materials.js" onload="KSL.ok('catalog-materials.js')" onerror="KSL.fail('catalog-materials.js')"></script>
+    <script defer src="<?= base ?>/dist/client/catalog-styles.js" onload="KSL.ok('catalog-styles.js')" onerror="KSL.fail('catalog-styles.js')"></script>
+    <script defer src="<?= base ?>/dist/client/catalog-exterior.js" onload="KSL.ok('catalog-exterior.js')" onerror="KSL.fail('catalog-exterior.js')"></script>
+    <script defer src="<?= base ?>/dist/client/catalog-interior.js" onload="KSL.ok('catalog-interior.js')" onerror="KSL.fail('catalog-interior.js')"></script>
+    <? } ?>
+
+    <? if (devGates) { ?>
+    <script>
+      // Owner-only Phase 0 gate harness (SPEC §2.1 gates 1, 2, 4). The panel
+      // renders over the boot cube, which still mounts because gate 1 measures
+      // its first frame and gate 2 needs window.THREE.
+      window.KSGates = (function () {
+        var corsErrors = [];
+        window.addEventListener('error', function (event) {
+          var text = String((event && event.message) || '');
+          if (/cors|cross-origin/i.test(text)) corsErrors.push(text);
+        }, true);
+
+        function row(gate, result, measured, notes) {
+          return { gate: gate, result: result, measured: measured, notes: notes };
+        }
+
+        function gate1(boot, bootAt, firstFrameAt) {
+          var budget = boot.firstRenderBudgetMs || 6000;
+          var fromCdn = boot.loaderMode === 'cdn';
+          var withinBudget = firstFrameAt > 0 && firstFrameAt < budget;
+          return row(
+            '1 — Loader',
+            fromCdn && withinBudget ? 'PASS' : 'FAIL',
+            Math.round(firstFrameAt) + ' ms to first frame',
+            (fromCdn ? 'All bundles loaded from jsDelivr.' : 'loader_mode is inline, not jsDelivr.') +
+              ' Boot block at ' + Math.round(bootAt) + ' ms. Budget ' + budget + ' ms.'
+          );
+        }
+
+        function proceduralChecker(THREE, size, cell) {
+          var canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          var ctx = canvas.getContext('2d');
+          for (var y = 0; y < size; y += cell) {
+            for (var x = 0; x < size; x += cell) {
+              var on = ((x / cell) + (y / cell)) % 2 === 0;
+              ctx.fillStyle = on ? '#0F7C8C' : '#FFFFFF';
+              ctx.fillRect(x, y, cell, cell);
+            }
+          }
+          var texture = new THREE.CanvasTexture(canvas);
+          texture.colorSpace = THREE.SRGBColorSpace;
+          return texture;
+        }
+
+        function gate2(boot, host) {
+          return new Promise(function (resolve) {
+            var THREE = window.THREE;
+            if (!THREE) { resolve(row('2 — Texture', 'FAIL', 'n/a', 'window.THREE is not available.')); return; }
+
+            var renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            renderer.setSize(240, 120);
+            host.appendChild(renderer.domElement);
+
+            var scene = new THREE.Scene();
+            var camera = new THREE.OrthographicCamera(-2, 2, 1, -1, 0.1, 10);
+            camera.position.z = 2;
+
+            var generated = proceduralChecker(THREE, 64, 8);
+            var left = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.8), new THREE.MeshBasicMaterial({ map: generated }));
+            left.position.x = -1;
+            scene.add(left);
+
+            var url = boot.base + '/assets/test/checker.png';
+            var loader = new THREE.TextureLoader();
+            loader.setCrossOrigin('anonymous');
+            loader.load(
+              url,
+              function (texture) {
+                texture.colorSpace = THREE.SRGBColorSpace;
+                var right = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.8), new THREE.MeshBasicMaterial({ map: texture }));
+                right.position.x = 1;
+                scene.add(right);
+                renderer.render(scene, camera);
+                var clean = corsErrors.length === 0;
+                resolve(row(
+                  '2 — Texture',
+                  clean ? 'PASS' : 'FAIL',
+                  'canvas 64px + ' + texture.image.naturalWidth + 'px PNG',
+                  clean ? 'Canvas texture and jsDelivr PNG both rendered, no CORS error.' : ('CORS errors: ' + corsErrors.join('; '))
+                ));
+              },
+              undefined,
+              function () {
+                renderer.render(scene, camera);
+                resolve(row('2 — Texture', 'FAIL', 'canvas 64px + PNG failed', 'Could not load ' + url + '.'));
+              }
+            );
+          });
+        }
+
+        function gate4() {
+          return new Promise(function (resolve) {
+            if (!window.indexedDB) { resolve(row('4 — Storage', 'FAIL', 'n/a', 'indexedDB is unavailable; thumbnail cache uses the memory fallback.')); return; }
+            var dbName = 'ks_gate4_' + Date.now();
+            var payload = { id: 1, blob: 'keystone-gate-4-' + Math.random().toString(36).slice(2) };
+            var request = indexedDB.open(dbName, 1);
+
+            request.onupgradeneeded = function () { request.result.createObjectStore('probe', { keyPath: 'id' }); };
+            request.onerror = function () { resolve(row('4 — Storage', 'FAIL', 'open failed', 'IndexedDB is blocked in this iframe; thumbnail cache uses the memory fallback.')); };
+            request.onsuccess = function () {
+              var db = request.result;
+              var write = db.transaction('probe', 'readwrite').objectStore('probe').put(payload);
+              write.onerror = function () { db.close(); resolve(row('4 — Storage', 'FAIL', 'write failed', 'Thumbnail cache uses the memory fallback.')); };
+              write.onsuccess = function () {
+                var read = db.transaction('probe', 'readonly').objectStore('probe').get(1);
+                read.onerror = function () { db.close(); resolve(row('4 — Storage', 'FAIL', 'read failed', 'Thumbnail cache uses the memory fallback.')); };
+                read.onsuccess = function () {
+                  var identical = !!read.result && read.result.blob === payload.blob;
+                  db.close();
+                  indexedDB.deleteDatabase(dbName);
+                  resolve(row(
+                    '4 — Storage',
+                    identical ? 'PASS' : 'FAIL',
+                    identical ? 'read-back byte-identical' : 'read-back differed',
+                    identical ? 'IndexedDB works inside the deployed iframe.' : 'Thumbnail cache uses the memory fallback.'
+                  ));
+                };
+              };
+            };
+          });
+        }
+
+        function paint(boot) {
+          var panel = document.createElement('div');
+          panel.className = 'ks-gates';
+          var card = document.createElement('div');
+          card.className = 'ks-gates__card';
+          panel.appendChild(card);
+
+          var heading = document.createElement('h1');
+          heading.textContent = 'Phase 0 gates';
+          heading.style.margin = '0 0 6px';
+          heading.style.fontSize = '20px';
+          card.appendChild(heading);
+
+          var meta = document.createElement('p');
+          meta.className = 'ks-gates__meta';
+          meta.textContent = 'tag ' + boot.tag + '  ·  channel ' + boot.channel +
+            '  ·  loader ' + boot.loaderMode + '  ·  ' + new Date().toISOString();
+          card.appendChild(meta);
+
+          // What server code is actually running (ticket 004). Written by the
+          // updater after every successful write; blank until it has run once.
+          var server = document.createElement('p');
+          server.className = 'ks-gates__meta';
+          server.textContent = boot.serverTag
+            ? 'server code ' + boot.serverTag + '  ·  ' + (boot.serverFingerprint || 'no fingerprint recorded')
+            : 'server code: not recorded yet — run Keystone → Update server code once to set server_tag.';
+          card.appendChild(server);
+
+          var table = document.createElement('table');
+          table.innerHTML = '<thead><tr><th>Gate</th><th>Result</th><th>Measured</th><th>Notes</th></tr></thead>';
+          var tbody = document.createElement('tbody');
+          table.appendChild(tbody);
+          card.appendChild(table);
+
+          var canvasHost = document.createElement('div');
+          canvasHost.className = 'ks-gates__canvas';
+          card.appendChild(canvasHost);
+
+          document.body.appendChild(panel);
+          return { tbody: tbody, canvasHost: canvasHost };
+        }
+
+        function setRows(tbody, rows) {
+          tbody.innerHTML = '';
+          rows.forEach(function (r) {
+            var tr = document.createElement('tr');
+            [r.gate, r.result, r.measured, r.notes].forEach(function (value, index) {
+              var td = document.createElement('td');
+              td.textContent = value;
+              if (index === 1) {
+                td.className = r.result === 'PASS' ? 'ks-pass' : (r.result === 'FAIL' ? 'ks-fail' : 'ks-skip');
+              }
+              if (index === 2) td.className = 'num';
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+        }
+
+        return {
+          run: function (boot, bootAt, firstFrameAt) {
+            var view = paint(boot);
+            var rows = [
+              gate1(boot, bootAt, firstFrameAt),
+              row('2 — Texture', 'running', '', 'Rendering canvas texture and jsDelivr PNG.'),
+              row('3 — Round-trip', 'not in this ticket', '', 'Ticket 003.'),
+              row('4 — Storage', 'running', '', 'Probing IndexedDB inside the iframe.'),
+              row('5 — Release', 'PASS', boot.tag, 'This page loaded its bundles from ' + boot.tag + '.'),
+              row('6 — Updater', 'not in this ticket', '', 'Ticket 004.')
+            ];
+            setRows(view.tbody, rows);
+
+            gate2(boot, view.canvasHost).then(function (r) { rows[1] = r; setRows(view.tbody, rows); report(rows); });
+            gate4().then(function (r) { rows[3] = r; setRows(view.tbody, rows); report(rows); });
+          }
+        };
+
+        function report(rows) {
+          var pending = rows.filter(function (r) { return r.result === 'running'; });
+          if (!pending.length) console.log('[KS] gates', rows);
+        }
+      })();
+    </script>
+    <? } ?>
+
+    <? if (devGate3) { ?>
+    <script>
+      // Owner-only Phase 0 gate 3 harness (SPEC §2.1 gate 3, §6.4; ticket 005 §4-5).
+      //
+      // Reports per-chunk figures, not just totals. Totals hid the load-path
+      // defect for a whole ticket: 518.9 s reads as "slow network" until you
+      // divide by 70 and compare it against the save side.
+      //
+      //   ?dev=gate3           normal round trip
+      //   ?dev=gate3&evict=17  drop chunk 17 after the cache is primed, to
+      //                        exercise the miss fallback on a live deployment
+      //   ?dev=gate3&cold=1    send no cacheKeyBase, forcing every chunk slow
+      window.KSGate3 = (function () {
+        var BYTES = 5 * 1024 * 1024;
+        var SEED = 0x5eed1e;
+        var MEDIAN_RATIO_BUDGET = 1.5;
+
+        function makeBuffer(length, seed) {
+          var out = new Uint8Array(length);
+          var x = seed >>> 0 || 1;
+          for (var i = 0; i < length; i++) {
+            x ^= x << 13; x >>>= 0;
+            x ^= x >>> 17;
+            x ^= x << 5;  x >>>= 0;
+            out[i] = x & 0xff;
+          }
+          return out;
+        }
+
+        function hex(buffer) {
+          var view = new Uint8Array(buffer);
+          var out = '';
+          for (var i = 0; i < view.length; i++) out += ('0' + view[i].toString(16)).slice(-2);
+          return out;
+        }
+
+        function sha256(bytes) { return crypto.subtle.digest('SHA-256', bytes).then(hex); }
+
+        function ms(n) { return Math.round(n).toLocaleString() + ' ms'; }
+
+        function spread(label, s) {
+          return [label, ms(s.min) + '  /  ' + ms(s.median) + '  /  ' + ms(s.max)];
+        }
+
+        function paint(boot) {
+          var panel = document.createElement('div');
+          panel.className = 'ks-gates';
+          var card = document.createElement('div');
+          card.className = 'ks-gates__card';
+          panel.appendChild(card);
+
+          var heading = document.createElement('h1');
+          heading.textContent = 'Phase 0 gate 3 - Drive round-trip';
+          heading.style.margin = '0 0 6px';
+          heading.style.fontSize = '20px';
+          card.appendChild(heading);
+
+          var mode = [];
+          if (boot.gate3Evict !== null && boot.gate3Evict !== undefined) mode.push('evict chunk ' + boot.gate3Evict);
+          if (boot.gate3Cold) mode.push('cold, no cacheKeyBase');
+
+          var meta = document.createElement('p');
+          meta.className = 'ks-gates__meta';
+          meta.textContent = 'tag ' + boot.tag + '  ·  channel ' + boot.channel +
+            (mode.length ? '  ·  ' + mode.join(', ') : '') + '  ·  ' + new Date().toISOString();
+          card.appendChild(meta);
+
+          var status = document.createElement('p');
+          status.style.fontSize = '14px';
+          card.appendChild(status);
+
+          var table = document.createElement('table');
+          table.innerHTML = '<thead><tr><th>Measure</th><th>Value</th></tr></thead>';
+          var tbody = document.createElement('tbody');
+          table.appendChild(tbody);
+          card.appendChild(table);
+
+          document.body.appendChild(panel);
+          return { status: status, tbody: tbody };
+        }
+
+        function setRows(tbody, rows) {
+          tbody.innerHTML = '';
+          rows.forEach(function (r) {
+            var tr = document.createElement('tr');
+            var label = document.createElement('td');
+            label.textContent = r[0];
+            var value = document.createElement('td');
+            value.textContent = r[1];
+            value.className = 'num';
+            if (r[2]) value.classList.add(r[2]);
+            tr.appendChild(label);
+            tr.appendChild(value);
+            tbody.appendChild(tr);
+          });
+        }
+
+        return {
+          run: function (boot) {
+            var view = paint(boot);
+            var rows = [];
+            var evictAt = boot.gate3Evict;
+            var summarize = KS.persistence.summarize;
+            var buffer, sourceDigest, saved, loaded;
+
+            function show(note) {
+              view.status.textContent = note;
+              setRows(view.tbody, rows);
+            }
+
+            show('Generating ' + BYTES.toLocaleString() + ' bytes...');
+            buffer = makeBuffer(BYTES, SEED);
+            rows.push(['Buffer size', BYTES.toLocaleString() + ' bytes']);
+
+            return sha256(buffer)
+              .then(function (digest) {
+                sourceDigest = digest;
+                rows.push(['SHA-256 before gzip', digest]);
+                show('Saving to Drive...');
+                return KS.persistence.saveBuild(buffer, { name: 'gate3-roundtrip', schema: 1 }, {
+                  onProgress: function (p) {
+                    if (p.phase === 'upload') {
+                      view.status.textContent = 'Uploading chunk ' + p.index + ' of ' + p.total + '...';
+                    } else if (p.phase === 'resize') {
+                      view.status.textContent = 'Chunk rejected; retrying at ' +
+                        p.chunkSize.toLocaleString() + ' chars...';
+                    }
+                  }
+                });
+              })
+              .then(function (result) {
+                saved = result;
+                rows.push(['gzip size', result.gzipBytes.toLocaleString() + ' bytes']);
+                rows.push(['base64 size', result.base64Chars.toLocaleString() + ' chars']);
+                rows.push(['Final chunk size', result.chunkSize.toLocaleString() + ' chars']);
+                rows.push(['Chunk count', String(result.chunkCount)]);
+                rows.push(['Upload attempts', String(result.uploadAttempts)]);
+                rows.push(['buildId', result.buildId]);
+                show('Loading back from Drive...');
+
+                return KS.persistence.loadBuild(result.buildId, {
+                  forceCold: !!boot.gate3Cold,
+                  onInfo: function (info) {
+                    if (evictAt === null || evictAt === undefined) return null;
+                    view.status.textContent = 'Evicting chunk ' + evictAt + ' to exercise the fallback...';
+                    return KS.persistence.callServer('api_devEvictChunk', [info.cacheKeyBase, evictAt]);
+                  },
+                  onProgress: function (p) {
+                    view.status.textContent = 'Downloading chunk ' + p.index + ' of ' + p.total + '...';
+                  }
+                });
+              })
+              .then(function (result) {
+                loaded = result;
+                rows.push(['Bytes read back', result.bytes.length.toLocaleString() + ' bytes']);
+                return sha256(result.bytes);
+              })
+              .then(function (digest) {
+                var saveStats = summarize(saved.chunkMs);
+                var loadStats = summarize(loaded.chunkMs);
+                var ratio = saveStats.median > 0 ? loadStats.median / saveStats.median : Infinity;
+                var withinBudget = ratio <= MEDIAN_RATIO_BUDGET;
+
+                rows.push(spread('Per-chunk save   min / median / max', saveStats));
+                rows.push(spread('Per-chunk load   min / median / max', loadStats));
+                rows.push(['Save wall clock', saved.seconds.toFixed(1) + ' s']);
+                rows.push(['Load wall clock', loaded.seconds.toFixed(1) + ' s']);
+                rows.push(['Cache hits / misses on load', loaded.cacheHits + ' / ' + loaded.cacheMisses]);
+
+                if (evictAt !== null && evictAt !== undefined && loaded.chunkMs[evictAt] !== undefined) {
+                  rows.push(['Evicted chunk ' + evictAt + ' load time', ms(loaded.chunkMs[evictAt])]);
+                }
+
+                rows.push([
+                  'Median load / median save',
+                  (isFinite(ratio) ? ratio.toFixed(2) + 'x' : 'n/a') + '   (budget ' + MEDIAN_RATIO_BUDGET + 'x)',
+                  withinBudget ? 'ks-pass' : 'ks-fail'
+                ]);
+
+                rows.push(['SHA-256 after gunzip', digest]);
+                var pass = digest === sourceDigest && loaded.bytes.length === BYTES;
+                rows.push(['Gate 3', pass ? 'PASS' : 'FAIL', pass ? 'ks-pass' : 'ks-fail']);
+
+                show(pass
+                  ? 'Byte-identical round trip. Cleaning up the test build...'
+                  : 'Digests differ. Cleaning up the test build...');
+                console.log('[KS] gate3', {
+                  source: sourceDigest, loaded: digest, save: saveStats, load: loadStats,
+                  ratio: ratio, cacheHits: loaded.cacheHits, cacheMisses: loaded.cacheMisses
+                });
+                return KS.persistence.callServer('api_deleteBuild', [saved.buildId]);
+              })
+              .then(function () {
+                rows.push(['Test build', 'soft-deleted']);
+                show('Done. Transcribe these into docs/PHASE0_RESULTS.md.');
+              })
+              .catch(function (err) {
+                rows.push(['Gate 3', 'FAIL', 'ks-fail']);
+                rows.push(['Error', (err && err.code ? err.code + ': ' : '') + (err && err.message ? err.message : String(err))]);
+                show('Gate 3 failed.');
+                console.error('[KS] gate3 failed', err);
+              });
+          }
+        };
+      })();
+    </script>
+    <? } ?>
+
+    <script>
+      // Inline blocks cannot carry a meaningful `defer`, so the boot block waits
+      // for DOMContentLoaded, which fires after every deferred script has run.
+      document.addEventListener('DOMContentLoaded', function () { KSL.boot(); });
+    </script>
+  </body>
+</html>
