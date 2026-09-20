@@ -44,6 +44,28 @@ jobs:
           git tag "${TAG}"
           git push origin "${TAG}"
 
+      # The test channel reads the newest tag from dist/manifest.json on the
+      # `release` branch (ADR 0003). Tag URLs are immutable and cached forever;
+      # branch URLs are not, so without this the manifest can serve the previous
+      # build's tag for hours and a merged PR stays invisible on test.
+      #
+      # Best effort by design: a failed purge means the tag appears late, which
+      # the 60 s Settings cache and the stable_tag fallback both survive. It is
+      # not worth failing a release that has already been built and tagged.
+      - name: Purge the jsDelivr cache for the release manifest
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          URL="https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@release/dist/manifest.json"
+          echo "Purging ${URL}"
+          CODE=$(curl -sS -o /tmp/purge.json -w '%{http_code}' --max-time 30 "${URL}" || echo "000")
+          echo "HTTP ${CODE}"
+          cat /tmp/purge.json || true
+          echo
+          if [ "${CODE}" != "200" ]; then
+            echo "::warning::jsDelivr purge returned ${CODE}; the manifest may serve a stale tag until its own TTL expires."
+          fi
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

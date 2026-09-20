@@ -515,6 +515,27 @@ same broken code path is not a recovery path.
 
 ## If something goes wrong
 
+**"Access blocked: Keystone has not completed the Google verification process",
+or a URL that becomes `script.google.com/a/macros/<your-domain>/s/...`**
+
+The `/a/macros/<domain>/` shape means the browser is signed into a **Google
+Workspace** account, and that account is not on the Cloud project's OAuth
+test-user list. Google refuses it with `Error 403: access_denied` before any
+Keystone code runs, so there is no `Log` row and no `doGet` in the execution
+list.
+
+Two fixes, either one works:
+
+- Open the URL in a browser or profile signed into the **personal** Google
+  account that is already a test user, or
+- Add the Workspace address under **Google Auth Platform → Audience → Test
+  users** (step 6d) *and* to the `Users` tab (step 10). Both lists, as always.
+
+This is not a deployment problem, and it hits the stable and test URLs exactly
+the same way. ADR 0004 records the investigation: the whole project believed the
+test deployment was broken because every test-URL attempt happened in the work
+browser and every stable-URL attempt happened in the personal one.
+
 **A Google Drive error page: "Sorry, unable to open the file at this time."**
 
 You are signed into more than one Google account. Google rewrites the web app
@@ -525,6 +546,10 @@ answers instead of the script.
 It looks exactly like a broken deployment, but it is not: the request never
 reaches your script, so **the Apps Script execution log shows no `doGet` run at
 all.** That absence is how you tell this apart from a real server error.
+
+This is a **different** failure from the Workspace one above — a different
+rewrite (`/u/N/` rather than `/a/macros/<domain>/`) and a different error page.
+Check which rewrite the address bar shows before deciding which fix applies.
 
 Fix it by making the request come from a browser where the Keystone account is
 the default:
@@ -554,8 +579,15 @@ The page names the missing `Settings` key. Add it and reload. Remember the
 5-minute settings cache.
 
 **A yellow banner about a build tag.**
-The GitHub Releases lookup failed, so the page fell back to `stable_tag`. The
-banner says why. The app still works; it is just not on the newest build.
+The release-manifest lookup failed, so the page fell back to `stable_tag`. The
+banner says why and names the source it used. The app still works; it is just
+not on the newest build.
+
+Since ADR 0003 the newest tag comes from
+`{asset_base_url with @release}/dist/manifest.json` on the CDN, not from the
+GitHub API. If the banner persists, open that URL in a browser: it should be
+JSON whose `tag` is the newest `build-*`. A 404 means the `release` branch or
+the purge step is the problem, not your Settings.
 
 **The loading screen stops with a red file.**
 That bundle did not load from jsDelivr at that tag. As the owner you get a
@@ -569,8 +601,11 @@ reload. The server then fetches the bundles and inlines them. This is slower, so
 only use it if `cdn` does not work.
 
 **Nothing changed after a new release.**
-The test URL looks up the newest `build-*` tag and caches it for 60 seconds.
-Wait a minute and reload. If the change was to server code, a release alone does
+The test channel looks up the newest `build-*` tag from the release manifest on
+the CDN and caches it for 60 seconds. Wait a minute and reload. If it is still
+stale after several minutes, the release workflow's jsDelivr purge step may have
+failed — check the workflow run for a warning, and open the manifest URL above
+to see which tag it is actually serving. If the change was to server code, a release alone does
 nothing — run *Update server code* (step 13).
 
 **"The Apps Script API answered 403."**

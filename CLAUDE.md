@@ -18,6 +18,12 @@ The owner says "Do ticket NNN." Open `docs/tickets/NNN-*.md` and do exactly that
 7. Commit as `NNN: <summary>` and open a PR against `main`.
 
 ## Hard rules
+- **Verify from outside.** An acceptance check must observe the outcome from
+  outside the system that produced it. A tool reporting success is not evidence
+  that the thing works. If a ticket adds a URL, the check opens the URL in a
+  browser. If it adds a menu item, the check clicks the menu item. If it adds a
+  deployment, the check loads the deployment. A component's own report of what
+  it did is a log line, not a verification.
 - Never commit `dist/` to `main`. Only the release workflow writes `dist/`, on the `release` branch.
 - Server code in `src/server/` must run as plain Apps Script (V8): no imports, no bundling, no npm packages. Keep it small.
 - Client code must not use `localStorage`-only persistence for build data; builds save through the server API (SPEC §14).
