@@ -22,6 +22,16 @@ that gate does.
 Gate 1 came in at 109 ms against a 6000 ms budget — roughly 55x headroom. That
 is the loader and the Phase 0 cube only; the real engine arrives in Phase 1.
 
+**What gate 1 measures changed in ticket 008.** The 109 ms above was the Phase 0
+cube: one box, one ground plane, two lights. From `build-15` onward `?dev=gates`
+times first render of the real lot scene — sky dome, terrain mesh, ground ring,
+build grid, three lights and a fitted shadow frustum. The two numbers are not
+comparable and the 109 ms is kept here as the historical measurement rather than
+being overwritten, so nobody reads a later figure as a regression against it.
+A local headless run of the new scene reached first render in about 46 ms on a
+software renderer; the deployed figure belongs in a fresh gate 1 row when the
+owner next runs `?dev=gates`.
+
 Gate 4 passing means IndexedDB is available inside the `HtmlService` iframe, so
 the thumbnail cache (§13.3) can use it rather than falling back to memory.
 

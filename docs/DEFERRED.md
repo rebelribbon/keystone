@@ -7,10 +7,6 @@ Cuts made intentionally, with the reason. (Hard rule: no shipped TODOs — cuts 
   Semver checks, `requires` resolution, per-item schema validation, and the
   dev-vs-prod duplicate behavior land with the ticket that first ships real catalog
   content, so validation is written against actual `MaterialDef`/`CatalogItem` data.
-- **Render on demand (§4.2)** — deferred from ticket 001. The Phase 0 boot cube uses a
-  continuous `requestAnimationFrame` loop because there is no store or camera-change
-  signal to render against yet. Render-on-demand arrives with the real engine in
-  Phase 1.
 - **Automatic detection of a blocked external script (§2.1 gate 1 fallback)** — deferred
   from ticket 002. The jsDelivr fallback is an explicit `Settings` key, `loader_mode`,
   taking `cdn` (default) or `inline`; it is not detected at runtime. The reliable

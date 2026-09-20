@@ -154,7 +154,7 @@
             }
             bootAt = performance.now();
             try {
-              window.KS.boot({ tag: boot.tag, channel: boot.channel, user: boot.user });
+              window.KS.boot({ tag: boot.tag, channel: boot.channel, user: boot.user, dev: boot.dev });
             } catch (err) {
               errorEl.hidden = false;
               errorEl.textContent = 'KS.boot failed: ' + (err && err.message ? err.message : err);
